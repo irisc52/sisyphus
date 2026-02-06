@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sisyphus - Anti-Doomscrolling</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup">
+    <header>
+      <h1>🪨 Sisyphus</h1>
+      <p class="subtitle">Anti-doomscrolling tracker</p>
+    </header>
+
+    <section class="add-domain">
+      <label for="domain-input">Track domain</label>
+      <div class="input-row">
+        <input type="text" id="domain-input" placeholder="example.com" autocomplete="off">
+        <button id="add-domain-btn" type="button">Add</button>
+      </div>
+      <p class="hint">Enter a domain (e.g. tiktok.com, reddit.com) to track scroll time. Resets every 24 hours.</p>
+    </section>
+
+    <section class="current-domain" id="current-domain-section">
+      <p class="current-label">Current page</p>
+      <p class="current-domain-name" id="current-domain-name">—</p>
+      <button id="add-current-btn" type="button" class="secondary">Add current site</button>
+    </section>
+
+    <section class="tracked-domains">
+      <h2>Tracked domains</h2>
+      <ul id="domain-list"></ul>
+      <p class="empty-state" id="empty-state">No domains tracked yet. Add one above.</p>
+    </section>
+
+    <section class="stats">
+      <h2>Today's scroll time</h2>
+      <div id="stats-list"></div>
+    </section>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
