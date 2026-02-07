@@ -9,23 +9,25 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var data = SisyphusData.shared
-    
+
     private let timeOptions = [5, 10, 15, 30, 45, 60, 90, 120]
-    
+
     private var scrollLimitBinding: Binding<Int> {
         Binding(
-            get: { data.scrollLimitMinutes },
+            get: {
+                let m = data.scrollLimitMinutes
+                return timeOptions.contains(m) ? m : 30
+            },
             set: { data.scrollLimitMinutes = $0 }
         )
     }
-    
+
     var body: some View {
         if #available(iOS 16.0, *) {
             NavigationStack {
                 Form {
                     Section {
                         Picker("Daily scroll limit", selection: scrollLimitBinding) {
-                            Text("Unlimited").tag(0)
                             ForEach(timeOptions, id: \.self) { mins in
                                 Text("\(mins) min").tag(mins)
                             }
@@ -73,7 +75,12 @@ struct SettingsView: View {
                     }
                 }
                 .navigationTitle("Settings")
-                .onAppear { data.refresh() }
+                .onAppear {
+                    data.refresh()
+                    if data.scrollLimitMinutes == 0 {
+                        data.scrollLimitMinutes = 30
+                    }
+                }
             }
         } else {
             // Fallback on earlier versions

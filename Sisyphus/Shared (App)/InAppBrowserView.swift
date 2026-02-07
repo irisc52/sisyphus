@@ -104,9 +104,9 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, UI
     /// User's time limit in seconds; interventions (friction, darkening, popups) start only after this.
     private var interventionLimitSeconds: Int { limitSecondsFromScrollLimit(scrollLimitMs) }
     /// Ramp duration for darkening after limit (seconds). Shorter when at harsh location.
-    private var darkenRampSec: Int { isAtHarshLocation ? 30 : 60 }
+    private var darkenRampSec: Int { isAtHarshLocation ? 45 : 90 }
     /// Ramp duration for friction after limit (seconds).
-    private let frictionRampSec = 20
+    private let frictionRampSec = 45
     /// Min friction multiplier (lower = harsher). Harsher when at harsh location.
     private var frictionMinMult: CGFloat { isAtHarshLocation ? 0.05 : 0.20 }
     private let frictionManualGain: CGFloat = 1.35
@@ -137,6 +137,10 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, UI
     private var isAtHarshLocation = false
     private let harshLocationRadiusMeters: Double = 150
     private var locationManager: CLLocationManager?
+    private weak var frictionPanRecognizer: UIPanGestureRecognizer?
+    /// Accumulated scroll delta from pan; flushed to JS once per frame to reduce jitter.
+    private var accumulatedScrollDy: CGFloat = 0
+    private var displayLink: CADisplayLink?
 
     init(url: URL, domain: String, scrollLimitMs: Int64, grayscaleSeconds: Int,
          breakOverlayAfterMinutes: Int,
@@ -195,6 +199,7 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, UI
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handleFrictionPan(_:)))
         pan.delegate = self
+        frictionPanRecognizer = pan
         wv.addGestureRecognizer(pan)
         wv.scrollView.panGestureRecognizer.require(toFail: pan)
 
@@ -239,10 +244,17 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, UI
         stopSessionTimers()
     }
 
-    /// Grayscale/fade: 0 until user's limit, then ramps over darkenRampSec.
+    /// Smoothstep for gradual start/end: t*t*(3 - 2*t) in [0,1].
+    private static func smoothstep(_ t: Double) -> Double {
+        let x = min(1.0, max(0, t))
+        return x * x * (3 - 2 * x)
+    }
+
+    /// Grayscale/fade: 0 until user's limit, then ramps smoothly over darkenRampSec.
     private func grayscaleIntensity(for seconds: Int) -> CGFloat {
         if seconds < interventionLimitSeconds { return 0 }
-        return CGFloat(min(1, Double(seconds - interventionLimitSeconds) / Double(darkenRampSec)))
+        let t = Double(seconds - interventionLimitSeconds) / Double(darkenRampSec)
+        return CGFloat(Self.smoothstep(min(1.0, t)))
     }
 
     private func fadeAlpha(for seconds: Int) -> CGFloat {
@@ -280,6 +292,12 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, UI
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
 
+    /// Only activate friction pan when over the limit; otherwise let native scroll handle it.
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === frictionPanRecognizer else { return true }
+        return currentSessionSeconds >= interventionLimitSeconds
+    }
+
     private func applyNativeGrayscale() {
         let intensity = grayscaleIntensity(for: currentSessionSeconds)
         fadeOverlay?.alpha = fadeAlpha(for: currentSessionSeconds)
@@ -297,18 +315,17 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, UI
         wv.layer.compositingFilter = grayscaleFilter
     }
 
-    /// No friction until session exceeds user's limit; then ramps over frictionRampSec.
+    /// No friction until session exceeds user's limit; then ramps smoothly over frictionRampSec.
     private func frictionMultiplier() -> CGFloat {
         if currentSessionSeconds < interventionLimitSeconds { return 1 }
         let secondsOverLimit = currentSessionSeconds - interventionLimitSeconds
         if secondsOverLimit <= 0 { return 1 }
         let t = min(1.0, Double(secondsOverLimit) / Double(frictionRampSec))
-        let ramp = t * t
+        let ramp = Self.smoothstep(t)
         return 1 - ramp * (1 - frictionMinMult)
     }
 
     @objc private func handleFrictionPan(_ gesture: UIPanGestureRecognizer) {
-        guard let wv = webView else { return }
         switch gesture.state {
         case .began:
             if firstScrollAt == nil { firstScrollAt = Date() }
@@ -317,17 +334,32 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, UI
             gesture.setTranslation(.zero, in: view)
             let mult = frictionMultiplier()
             let dy = -translation.y * mult * frictionManualGain
-            let js = "window.__SISYPHUS_SCROLL_BY__ && window.__SISYPHUS_SCROLL_BY__(\(dy));"
-            wv.evaluateJavaScript(js, completionHandler: nil)
+            accumulatedScrollDy += dy
         case .ended, .cancelled:
-            break
+            if abs(accumulatedScrollDy) > 0.5, let wv = webView {
+                let dy = accumulatedScrollDy
+                accumulatedScrollDy = 0
+                let js = "window.__SISYPHUS_SCROLL_BY__ && window.__SISYPHUS_SCROLL_BY__(\(dy));"
+                wv.evaluateJavaScript(js, completionHandler: nil)
+            }
         default:
             break
         }
     }
 
+    @objc private func displayLinkTick() {
+        guard abs(accumulatedScrollDy) > 0.5 else { return }
+        let dy = accumulatedScrollDy
+        accumulatedScrollDy = 0
+        guard let wv = webView else { return }
+        let js = "window.__SISYPHUS_SCROLL_BY__ && window.__SISYPHUS_SCROLL_BY__(\(dy));"
+        wv.evaluateJavaScript(js, completionHandler: nil)
+    }
+
     private func startSessionTimers() {
         stopSessionTimers()
+        displayLink = CADisplayLink(target: self, selector: #selector(displayLinkTick))
+        displayLink?.add(to: .main, forMode: .common)
         let domain = self.domain
         let report: (String, Int64) -> Void = onScrollTime
         let reportMs = Int64(sessionReportInterval * 1000)
@@ -352,6 +384,8 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, UI
     }
 
     private func stopSessionTimers() {
+        displayLink?.invalidate()
+        displayLink = nil
         sessionTimeTimer?.invalidate()
         sessionTimeTimer = nil
         sessionSecondsTimer?.invalidate()
@@ -372,11 +406,10 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, UI
             addBlurOverlay(to: container)
         } else if sec >= tier2Sec && !appliedTier2 {
             appliedTier2 = true
-            addLifeClock(minutes: minutes, to: container)
             addRegretQuote(to: container)
         } else if sec >= tier1Sec && !appliedTier1 {
             appliedTier1 = true
-            addOpportunityCost(to: container)
+            addLifeClock(minutes: minutes, to: container)
         }
     }
 
@@ -402,13 +435,13 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, UI
     }
 
     private func addLifeClock(minutes: Double, to container: UIView) {
-        let card = SisyphusPopupCard(gradientColors: Self.purpleGradient)
-        card.layer.name = "sisyphus_lifeclock"
-        card.translatesAutoresizingMaskIntoConstraints = false
-        card.alpha = 0
-        card.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
+        let banner = SisyphusPopupCard(gradientColors: Self.purpleGradient)
+        banner.layer.name = "sisyphus_lifeclock"
+        banner.translatesAutoresizingMaskIntoConstraints = false
+        banner.alpha = 0
+        banner.transform = CGAffineTransform(translationX: 0, y: -60)
 
-        let icon = UIImageView(image: UIImage(systemName: "clock.badge.exclamationmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .medium)))
+        let icon = UIImageView(image: UIImage(systemName: "clock.badge.exclamationmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .medium)))
         icon.tintColor = .white
         icon.translatesAutoresizingMaskIntoConstraints = false
 
@@ -416,41 +449,36 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, UI
         valueLabel.text = minutes >= 60
             ? String(format: "%.1f h", minutes / 60)
             : "\(Int(minutes)) min"
-        valueLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        valueLabel.font = .systemFont(ofSize: 16, weight: .bold)
         valueLabel.textColor = .white
 
         let subtitleLabel = UILabel()
         let pct = (minutes / 1440) * 100
         subtitleLabel.text = pct < 0.1 ? "Less than 0.1% of your day" : String(format: "%.1f%% of your day", pct)
-        subtitleLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.9)
+        subtitleLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.95)
 
-        let hintLabel = UILabel()
-        hintLabel.text = "You'll never get this back"
-        hintLabel.font = .systemFont(ofSize: 11, weight: .regular)
-        hintLabel.textColor = UIColor.white.withAlphaComponent(0.8)
-
-        let stack = UIStackView(arrangedSubviews: [icon, valueLabel, subtitleLabel, hintLabel])
-        stack.axis = .vertical
-        stack.spacing = 6
-        stack.alignment = .leading
+        let stack = UIStackView(arrangedSubviews: [icon, valueLabel, subtitleLabel])
+        stack.axis = .horizontal
+        stack.spacing = 12
+        stack.alignment = .center
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        card.addSubview(stack)
-        container.addSubview(card)
+        banner.addSubview(stack)
+        container.addSubview(banner)
         NSLayoutConstraint.activate([
-            card.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: 16),
-            card.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            card.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
-            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 16),
-            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
-            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -16)
+            banner.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor),
+            banner.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            banner.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            banner.heightAnchor.constraint(equalToConstant: 52),
+            stack.leadingAnchor.constraint(equalTo: banner.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: banner.trailingAnchor, constant: -20),
+            stack.centerYAnchor.constraint(equalTo: banner.centerYAnchor)
         ])
         container.layoutIfNeeded()
         UIView.animate(withDuration: 0.4, delay: 0, options: .curveEaseOut) {
-            card.alpha = 1
-            card.transform = .identity
+            banner.alpha = 1
+            banner.transform = .identity
         }
     }
 
@@ -509,63 +537,6 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, UI
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak card] in
             UIView.animate(withDuration: 0.3) { card?.alpha = 0 }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { card?.removeFromSuperview() }
-        }
-    }
-
-    private static let opportunityAlts = [
-        "You could have read 10 pages",
-        "You could have learned 20 new words",
-        "You could have done 100 pushups",
-        "You could have meditated",
-        "You could have called a friend",
-        "You could have written a page",
-        "You could have practiced an instrument",
-        "You could have cooked a meal"
-    ]
-
-    private func addOpportunityCost(to container: UIView) {
-        let card = SisyphusPopupCard(gradientColors: Self.blueGradient)
-        card.layer.name = "sisyphus_opportunity"
-        card.translatesAutoresizingMaskIntoConstraints = false
-        card.alpha = 0
-        card.transform = CGAffineTransform(translationX: 0, y: 24)
-
-        let icon = UIImageView(image: UIImage(systemName: "sparkles", withConfiguration: UIImage.SymbolConfiguration(pointSize: 22, weight: .medium)))
-        icon.tintColor = .white
-        icon.translatesAutoresizingMaskIntoConstraints = false
-
-        let titleLabel = UILabel()
-        titleLabel.text = "Instead of this…"
-        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
-        titleLabel.textColor = .white
-
-        let altLabel = UILabel()
-        altLabel.text = Self.opportunityAlts.randomElement()
-        altLabel.font = .systemFont(ofSize: 15, weight: .medium)
-        altLabel.textColor = UIColor.white.withAlphaComponent(0.95)
-        altLabel.numberOfLines = 2
-
-        let stack = UIStackView(arrangedSubviews: [icon, titleLabel, altLabel])
-        stack.axis = .vertical
-        stack.spacing = 8
-        stack.alignment = .leading
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        card.addSubview(stack)
-        container.addSubview(card)
-        NSLayoutConstraint.activate([
-            card.bottomAnchor.constraint(equalTo: container.safeAreaLayoutGuide.bottomAnchor, constant: -16),
-            card.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            card.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
-            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 16),
-            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
-            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -16)
-        ])
-        container.layoutIfNeeded()
-        UIView.animate(withDuration: 0.4, delay: 0, options: .curveEaseOut) {
-            card.alpha = 1
-            card.transform = .identity
         }
     }
 

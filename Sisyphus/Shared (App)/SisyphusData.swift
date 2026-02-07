@@ -29,6 +29,8 @@ class SisyphusData: ObservableObject {
     private let harshLocationAddressKey = "harshLocationAddress"
     private let harshLocationLatKey = "harshLocationLat"
     private let harshLocationLonKey = "harshLocationLon"
+    private let dailyScrollTotalsKey = "dailyScrollTotals"
+    private let hourlyScrollPrefix = "hourlyScroll_"
 
     /// App Group ID - add in Xcode: Signing & Capabilities → App Groups → group.ICKI.sisyphus
     private static let appGroupID = "group.ICKI.sisyphus"
@@ -148,6 +150,84 @@ class SisyphusData: ObservableObject {
         let data = scrollDataWithReset()
         return data.values.reduce(0) { $0 + $1.totalMs }
     }
+
+    /// Date string key for today (yyyy-MM-dd) in local timezone.
+    private static func todayDateKey() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone.current
+        return formatter.string(from: Date())
+    }
+
+    /// Scroll totals per calendar day (date key "yyyy-MM-dd" -> total ms). Persisted for weekly graph.
+    private var dailyScrollTotals: [String: Int64] {
+        get {
+            guard let data = defaults.data(forKey: dailyScrollTotalsKey),
+                  let decoded = try? JSONDecoder().decode([String: Int64].self, from: data) else {
+                return [:]
+            }
+            return decoded
+        }
+        set {
+            if let encoded = try? JSONEncoder().encode(newValue) {
+                defaults.set(encoded, forKey: dailyScrollTotalsKey)
+            }
+        }
+    }
+
+    /// Add scroll time to today's daily bucket (for weekly progress) and to current hour (for daily usage).
+    private func addToDailyTotal(ms: Int64) {
+        let key = Self.todayDateKey()
+        var totals = dailyScrollTotals
+        totals[key, default: 0] += ms
+        dailyScrollTotals = totals
+    }
+
+    /// Today's scroll time per hour (0–23). Persisted under key hourlyScroll_yyyy-MM-dd.
+    private var todayHourlyScroll: [Int64] {
+        get {
+            let key = hourlyScrollPrefix + Self.todayDateKey()
+            guard let data = defaults.data(forKey: key),
+                  let decoded = try? JSONDecoder().decode([Int64].self, from: data),
+                  decoded.count == 24 else {
+                return Array(repeating: 0, count: 24)
+            }
+            return decoded
+        }
+        set {
+            let key = hourlyScrollPrefix + Self.todayDateKey()
+            if let encoded = try? JSONEncoder().encode(newValue) {
+                defaults.set(encoded, forKey: key)
+            }
+        }
+    }
+
+    /// Add scroll time to the current hour's bucket (for daily usage graph).
+    private func addToHourlyTotal(ms: Int64) {
+        let hour = Calendar.current.component(.hour, from: Date())
+        var totals = todayHourlyScroll
+        totals[hour] += ms
+        todayHourlyScroll = totals
+    }
+
+    /// One bar for each hour (0–23): hour index, label (e.g. "12a", "6a", "12p"), and scroll ms.
+    struct HourBar: Identifiable {
+        let id: Int
+        let hour: Int
+        let label: String
+        let scrollMs: Int64
+    }
+
+    /// Usage over today's 24 hours. Scale in UI so 60 minutes = full bar height.
+    var hourlyProgressBars: [HourBar] {
+        let totals = todayHourlyScroll
+        return (0..<24).map { hour in
+            let h = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour)
+            let ampm = hour < 12 ? "a" : "p"
+            let label = "\(h)\(ampm)"
+            return HourBar(id: hour, hour: hour, label: label, scrollMs: totals[hour])
+        }
+    }
     
     func addDomain(_ input: String) -> Bool {
         let normalized = normalizeDomain(input)
@@ -218,6 +298,8 @@ class SisyphusData: ObservableObject {
                 newEntry = ScrollEntry(totalMs: entry!.totalMs + additionalMs, lastResetTimestamp: entry!.lastResetTimestamp)
             }
             data[normalized] = newEntry
+            self.addToDailyTotal(ms: additionalMs)
+            self.addToHourlyTotal(ms: additionalMs)
             self.objectWillChange.send()
             self.scrollData = data
         }
