@@ -96,6 +96,12 @@ async function updateScrollTime(domain, additionalMs) {
 /**
  * Calculate intervention level based on usage patterns and time since install
  * Implements "boiling frog" gradual escalation
+ *///
+
+// ... (Keep existing constants and storage keys) ...
+
+/**
+ * UPDATED: Calculate intervention level with Mode Selection
  */
 async function getInterventionLevel(domain) {
   const result = await chrome.storage.sync.get([
@@ -104,44 +110,84 @@ async function getInterventionLevel(domain) {
     'installDate'
   ]);
   
-  const scrollData = result[STORAGE_KEYS.SCROLL_DATA] || {};
   const settings = result[STORAGE_KEYS.SETTINGS] || {};
-  const installDate = result.installDate || Date.now();
   
-  const daysSinceInstall = (Date.now() - installDate) / (24 * 60 * 60 * 1000);
+  // 1. CHECK FOR MANUAL MODE OVERRIDE
+  // If the user selected a specific stage in the popup, return it immediately.
+  if (settings.mode && settings.mode !== 'auto') {
+    const MODE_MAP = {
+      'GENTLE': 1,
+      'MODERATE': 2,
+      'AGGRESSIVE': 3,
+      'NUCLEAR': 4
+    };
+    return MODE_MAP[settings.mode] || 0;
+  }
+
+  // --- STANDARD LOGIC (Boiling Frog) ---
+  const scrollData = result[STORAGE_KEYS.SCROLL_DATA] || {};
+  const installDate = result.installDate || Date.now();
   const scrollTime = scrollData[domain]?.totalMs || 0;
   const minutes = scrollTime / 60000;
-  
-  // Check if user has disabled interventions for this domain
-  if (settings.disabledDomains && settings.disabledDomains.includes(domain)) {
-    return InterventionLevel.OBSERVE;
-  }
-  
-  // Week 1: Just observe - let them see the tracking works
-  if (daysSinceInstall < 7) {
-    return InterventionLevel.OBSERVE;
-  }
-  
-  // Week 2: Gentle nudges after 20 minutes
-  if (daysSinceInstall < 14) {
-    return minutes > 20 ? InterventionLevel.GENTLE : InterventionLevel.OBSERVE;
-  }
-  
-  // Week 3: Start escalating
+  const daysSinceInstall = (Date.now() - installDate) / (24 * 60 * 60 * 1000);
+
+  if (settings.disabledDomains?.includes(domain)) return 0;
+
+  // Week 1
+  if (daysSinceInstall < 7) return 0;
+  // Week 2
+  if (daysSinceInstall < 14) return minutes > 20 ? 1 : 0;
+  // Week 3
   if (daysSinceInstall < 21) {
-    if (minutes < 15) return InterventionLevel.OBSERVE;
-    if (minutes < 30) return InterventionLevel.GENTLE;
-    return InterventionLevel.MODERATE;
+    if (minutes < 15) return 0;
+    if (minutes < 30) return 1;
+    return 2;
   }
-  
-  // Week 4+: Full graduated intervention
-  if (minutes < 10) return InterventionLevel.OBSERVE;
-  if (minutes < 20) return InterventionLevel.GENTLE;
-  if (minutes < 35) return InterventionLevel.MODERATE;
-  if (minutes < 50) return InterventionLevel.AGGRESSIVE;
-  return InterventionLevel.NUCLEAR; // Go nuclear after 50min
+  // Week 4+
+  if (minutes < 10) return 0;
+  if (minutes < 20) return 1;
+  if (minutes < 35) return 2;
+  if (minutes < 50) return 3;
+  return 4;
 }
 
+// ... (Keep helper functions like getScrollDataWithReset) ...
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // NEW: Handle Mode Change from Popup
+  if (message.type === 'SET_MODE') {
+    chrome.storage.sync.get([STORAGE_KEYS.SETTINGS], (result) => {
+      const settings = result[STORAGE_KEYS.SETTINGS] || {};
+      settings.mode = message.mode; // 'auto', 'GENTLE', etc.
+      chrome.storage.sync.set({ [STORAGE_KEYS.SETTINGS]: settings }, () => {
+        sendResponse({ success: true });
+      });
+    });
+    return true; 
+  }
+
+  // UPDATED: Fix the "Popup stops grayscale" bug
+  if (message.type === 'GET_INTERVENTION_LEVEL') {
+    // Priority: 1. Sender URL (Content Script), 2. Message URL (Popup must send this)
+    const urlToCHeck = sender.url && !sender.url.startsWith('chrome-extension') 
+      ? sender.url 
+      : message.url;
+
+    const domain = getDomainKey(urlToCHeck);
+    
+    if (domain) {
+      getInterventionLevel(domain).then(level => {
+        getScrollDataWithReset().then(scrollData => {
+          const minutes = (scrollData[domain]?.totalMs || 0) / 60000;
+          sendResponse({ level, minutes });
+        });
+      });
+    } else {
+      sendResponse({ level: 0, minutes: 0 });
+    }
+    return true;
+  }
+});
 /**
  * Message handler from content script
  */
