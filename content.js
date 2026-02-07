@@ -39,7 +39,7 @@
   // --- Scroll friction ---
   const FRICTION_START_AFTER_SCROLL = 10; // seconds after user starts scrolling
   const FRICTION_RAMP_SEC = 20; // seconds to get to max friction
-  const MIN_SCROLL_MULT = 0.3; // at max friction, only 0.5% of scroll remains (very noticeable)
+  const MIN_SCROLL_MULT = 0.05; // at max friction, only 0.5% of scroll remains (very noticeable)
 
   // Storage key per host
   const host = location.hostname.replace(/^www\./, '').replace(/^m\./, '');
