@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { SunIcon } from 'lucide-react'
 import { storage } from '../shared/storage'
 import './dashboard.css'
 
@@ -44,7 +45,7 @@ function Dashboard() {
   return (
     <div className="dashboard">
       <header>
-        <h1>⛰️ Sisyphus Dashboard</h1>
+        <h1>⛰️ Sisyphus</h1>
         <p className="subtitle">Track your progress fighting doomscrolling</p>
       </header>
 
@@ -76,7 +77,7 @@ function Dashboard() {
 
       <div className="content-grid">
         <div className="card domains-list">
-          <h2>🚫 Tracked Domains</h2>
+          <h2> Tracked Domains </h2>
           {data.domains.length === 0 ? (
             <p className="empty-state">No domains added yet. Add some in the popup!</p>
           ) : (
