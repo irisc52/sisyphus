@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Sisyphus",
+  "version": "1.0",
+  "description": "Anti-doomscrolling extension",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "permissions": ["storage", "tabs"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ],
+  "icons": {
+    "16": "images/icon16.png",
+    "48": "images/icon48.png"
+  }
+}
