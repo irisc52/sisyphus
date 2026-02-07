@@ -28,7 +28,7 @@
 
   const FRICTION_START_AFTER_SCROLL = 10;
   const FRICTION_RAMP_SEC = 20;
-  const MIN_SCROLL_MULT = 0.005;
+  const MIN_SCROLL_MULT = 0.01;
 
   // Scrollbar hiding toggle
   const HIDE_SCROLLBARS_WHEN_TRACKED = true;
