@@ -5,8 +5,11 @@
 
 const STORAGE_KEYS = {
   TRACKED_DOMAINS: 'trackedDomains',
-  SCROLL_DATA: 'scrollData'
+  SCROLL_DATA: 'scrollData',
+  SCROLL_LIMIT_MS: 'scrollLimitMs'
 };
+
+const DEFAULT_SCROLL_LIMIT_MS = 30 * 60 * 1000; // 30 min
 
 const HOURS_24_MS = 24 * 60 * 60 * 1000;
 
@@ -74,6 +77,17 @@ async function removeDomain(domain) {
   await chrome.storage.sync.set({ [STORAGE_KEYS.TRACKED_DOMAINS]: filtered });
 }
 
+async function getScrollLimitMs() {
+  const result = await chrome.storage.sync.get([STORAGE_KEYS.SCROLL_LIMIT_MS]);
+  const ms = result[STORAGE_KEYS.SCROLL_LIMIT_MS];
+  if (ms == null || ms < 0) return DEFAULT_SCROLL_LIMIT_MS;
+  return ms;
+}
+
+async function setScrollLimitMs(ms) {
+  await chrome.storage.sync.set({ [STORAGE_KEYS.SCROLL_LIMIT_MS]: ms });
+}
+
 function renderDomainList(domains) {
   const list = document.getElementById('domain-list');
   const empty = document.getElementById('empty-state');
@@ -135,6 +149,44 @@ async function init() {
   const addCurrentBtn = document.getElementById('add-current-btn');
   const currentDomainSection = document.getElementById('current-domain-section');
   const currentDomainName = document.getElementById('current-domain-name');
+  const scrollLimitSelect = document.getElementById('scroll-limit');
+  const scrollLimitCustom = document.getElementById('scroll-limit-custom');
+
+  // Scroll limit UI
+  const limitMs = await getScrollLimitMs();
+  const limitMins = limitMs === 0 ? 0 : Math.round(limitMs / 60000);
+  const presetMatch = scrollLimitSelect.querySelector(`option[value="${limitMins}"]`);
+  if (presetMatch) {
+    scrollLimitSelect.value = String(limitMins);
+    scrollLimitCustom.classList.add('hidden');
+  } else if (limitMs === 0) {
+    scrollLimitSelect.value = '0';
+    scrollLimitCustom.classList.add('hidden');
+  } else {
+    scrollLimitSelect.value = 'custom';
+    scrollLimitCustom.classList.remove('hidden');
+    scrollLimitCustom.value = limitMins;
+  }
+
+  scrollLimitSelect.addEventListener('change', async () => {
+    const val = scrollLimitSelect.value;
+    if (val === 'custom') {
+      scrollLimitCustom.classList.remove('hidden');
+      scrollLimitCustom.focus();
+      const mins = parseInt(scrollLimitCustom.value, 10) || 30;
+      await setScrollLimitMs(mins * 60 * 1000);
+    } else {
+      scrollLimitCustom.classList.add('hidden');
+      const mins = parseInt(val, 10) || 0;
+      await setScrollLimitMs(mins * 60 * 1000);
+    }
+  });
+
+  scrollLimitCustom.addEventListener('change', async () => {
+    const mins = Math.max(0, Math.min(480, parseInt(scrollLimitCustom.value, 10) || 0));
+    await setScrollLimitMs(mins * 60 * 1000);
+    scrollLimitCustom.value = mins;
+  });
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.url && (tab.url.startsWith('http://') || tab.url.startsWith('https://'))) {

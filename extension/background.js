@@ -6,7 +6,7 @@
 const STORAGE_KEYS = {
   TRACKED_DOMAINS: 'trackedDomains',
   SCROLL_DATA: 'scrollData',
-  SETTINGS: 'settings'
+  SCROLL_LIMIT_MS: 'scrollLimitMs'
 };
 
 const HOURS_24_MS = 24 * 60 * 60 * 1000;
@@ -110,6 +110,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const key = getDomainKey(message.url);
         sendResponse({ tracked: key ? domains.includes(key) : false });
       });
+    return true;
+  }
+
+  if (message.type === 'GET_SCROLL_LIMIT_MS') {
+    chrome.storage.sync.get([STORAGE_KEYS.SCROLL_LIMIT_MS])
+      .then(r => sendResponse({ limitMs: r[STORAGE_KEYS.SCROLL_LIMIT_MS] ?? 30 * 60 * 1000 }));
+    return true;
+  }
+
+  if (message.type === 'GET_SCROLL_TIME') {
+    const domain = getDomainKey(message.url);
+    if (!domain) {
+      sendResponse({ totalMs: 0 });
+      return false;
+    }
+    getScrollDataWithReset().then(scrollData => {
+      const entry = scrollData[domain];
+      sendResponse({ totalMs: entry?.totalMs ?? 0 });
+    });
     return true;
   }
 });
