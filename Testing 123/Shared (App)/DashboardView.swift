@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import CoreLocation
 
 struct DashboardView: View {
     @ObservedObject var data = SisyphusData.shared
@@ -47,6 +48,45 @@ struct DashboardView: View {
                                 subtitle: "after limit",
                                 gradient: [Color(hex: "43e97b"), Color(hex: "38f9d7")]
                             )
+                        }
+                        .padding(.horizontal)
+
+                        // Harsh mode at location — stronger interventions when at this address
+                        VStack(alignment: .leading, spacing: 12) {
+                            Label("Harsh mode at location", systemImage: "location.fill")
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
+                            HarshLocationSection(data: data)
+                            Text("When you're at this address and over your limit, friction and darkening are stronger and blur is added.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal)
+
+                        // Break reminder — when to show full-screen break in in-app browser
+                        VStack(alignment: .leading, spacing: 12) {
+                            Label("Break reminder", systemImage: "clock.badge.exclamationmark")
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
+                            HStack {
+                                Text("Show full-screen break after")
+                                    .font(.subheadline)
+                                Spacer()
+                                Stepper("\(data.breakOverlayAfterMinutes) min", value: Binding(
+                                    get: { data.breakOverlayAfterMinutes },
+                                    set: { data.breakOverlayAfterMinutes = min(60, max(1, $0)) }
+                                ), in: 1...60)
+                                .labelsHidden()
+                                Text("\(data.breakOverlayAfterMinutes) min")
+                                    .font(.subheadline.monospacedDigit())
+                                    .frame(width: 44, alignment: .trailing)
+                            }
+                            .padding()
+                            .background(Color(.systemGray6))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            Text("In the in-app browser, nothing happens until your Time Limit (per domain) is reached. Then friction, darkening, and popups start. This setting is when the full-screen break appears after that.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         .padding(.horizontal)
 
@@ -238,6 +278,61 @@ struct TipRow: View {
             Text(text)
                 .font(.subheadline)
                 .foregroundStyle(.primary)
+        }
+    }
+}
+
+struct HarshLocationSection: View {
+    @ObservedObject var data: SisyphusData
+    @State private var addressInput: String = ""
+    @State private var geocodeMessage: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("e.g. 123 Main St, City", text: $addressInput)
+                .textFieldStyle(.roundedBorder)
+                .autocapitalization(.words)
+                .onAppear { addressInput = data.harshLocationAddress }
+            HStack {
+                Button("Save location") {
+                    saveAndGeocode()
+                }
+                .buttonStyle(.borderedProminent)
+                if data.harshLocationLat != nil {
+                    Button("Clear") {
+                        data.harshLocationAddress = ""
+                        data.clearHarshLocationCoordinates()
+                        addressInput = ""
+                        geocodeMessage = nil
+                    }
+                    .foregroundStyle(.secondary)
+                }
+            }
+            if let msg = geocodeMessage {
+                Text(msg)
+                    .font(.caption)
+                    .foregroundStyle(msg.contains("Saved") ? .green : .red)
+            }
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func saveAndGeocode() {
+        let address = addressInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !address.isEmpty else { geocodeMessage = "Enter an address"; return }
+        data.harshLocationAddress = address
+        geocodeMessage = "Geocoding…"
+        CLGeocoder().geocodeAddressString(address) { placemarks, error in
+            DispatchQueue.main.async {
+                if let loc = placemarks?.first?.location {
+                    data.setHarshLocationCoordinates(lat: loc.coordinate.latitude, lon: loc.coordinate.longitude)
+                    geocodeMessage = "Saved. Harsh mode will apply when you're near this address."
+                } else {
+                    geocodeMessage = error?.localizedDescription ?? "Could not find address."
+                }
+            }
         }
     }
 }

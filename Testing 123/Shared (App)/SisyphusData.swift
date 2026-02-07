@@ -25,7 +25,11 @@ class SisyphusData: ObservableObject {
     private let trackedDomainsKey = "trackedDomains"
     private let scrollDataKey = "scrollData"
     private let scrollLimitMsKey = "scrollLimitMs"
-    
+    private let breakOverlayAfterMinutesKey = "breakOverlayAfterMinutes"
+    private let harshLocationAddressKey = "harshLocationAddress"
+    private let harshLocationLatKey = "harshLocationLat"
+    private let harshLocationLonKey = "harshLocationLon"
+
     /// App Group ID - add in Xcode: Signing & Capabilities → App Groups → group.ICKI.sisyphus
     private static let appGroupID = "group.ICKI.sisyphus"
 
@@ -60,7 +64,37 @@ class SisyphusData: ObservableObject {
     var scrollLimitMs: Int64 {
         scrollLimitMinutes > 0 ? Int64(scrollLimitMinutes) * 60 * 1000 : 0
     }
-    
+
+    /// Minutes of in-app browsing before the full-screen break overlay appears (1–60).
+    @Published var breakOverlayAfterMinutes: Int {
+        didSet {
+            defaults.set(breakOverlayAfterMinutes, forKey: breakOverlayAfterMinutesKey)
+        }
+    }
+
+    /// When at this location (after geocode), interventions in the in-app browser are harsher.
+    @Published var harshLocationAddress: String {
+        didSet { defaults.set(harshLocationAddress, forKey: harshLocationAddressKey) }
+    }
+    @Published var harshLocationLat: Double?
+    @Published var harshLocationLon: Double?
+
+    /// Call after geocoding an address to save coordinates for harsh-mode checks.
+    func setHarshLocationCoordinates(lat: Double, lon: Double) {
+        harshLocationLat = lat
+        harshLocationLon = lon
+        defaults.set(lat, forKey: harshLocationLatKey)
+        defaults.set(lon, forKey: harshLocationLonKey)
+    }
+
+    /// Clear saved harsh location coordinates.
+    func clearHarshLocationCoordinates() {
+        harshLocationLat = nil
+        harshLocationLon = nil
+        defaults.removeObject(forKey: harshLocationLatKey)
+        defaults.removeObject(forKey: harshLocationLonKey)
+    }
+
     init() {
         let store = UserDefaults(suiteName: Self.appGroupID) ?? UserDefaults.standard
         self.trackedDomains = store.stringArray(forKey: trackedDomainsKey) ?? []
@@ -74,6 +108,11 @@ class SisyphusData: ObservableObject {
 
         let limitMs = store.object(forKey: scrollLimitMsKey) as? Int64 ?? (30 * 60 * 1000)
         self.scrollLimitMinutes = limitMs > 0 ? Int(limitMs / 60000) : 0
+        let stored = store.integer(forKey: breakOverlayAfterMinutesKey)
+        self.breakOverlayAfterMinutes = (stored >= 1 && stored <= 60) ? stored : 2
+        self.harshLocationAddress = store.string(forKey: harshLocationAddressKey) ?? ""
+        self.harshLocationLat = store.object(forKey: harshLocationLatKey) as? Double
+        self.harshLocationLon = store.object(forKey: harshLocationLonKey) as? Double
     }
     
     func shouldReset(_ timestamp: Int64) -> Bool {

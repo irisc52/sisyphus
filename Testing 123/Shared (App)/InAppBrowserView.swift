@@ -2,12 +2,13 @@
 //  InAppBrowserView.swift
 //  Sisyphus
 //
-//  In-app browser: user picks a tracked domain, opens it here with grayscale + touch friction.
-//  Merged with friend's WebView (viewport, mobile prefs, touch-based friction, native-first feel).
+//  In-app browser: all interventions in Swift (grayscale, friction, timers, overlays).
 //
 
 import SwiftUI
 import WebKit
+import CoreImage
+import CoreLocation
 
 struct InAppBrowserView: View {
     let url: URL
@@ -23,6 +24,9 @@ struct InAppBrowserView: View {
                     domain: domain,
                     scrollLimitMs: data.scrollLimitMs,
                     grayscaleSeconds: data.getGrayscaleSeconds(host: domain),
+                    breakOverlayAfterMinutes: data.breakOverlayAfterMinutes,
+                    harshLocationLat: data.harshLocationLat,
+                    harshLocationLon: data.harshLocationLon,
                     onScrollTime: { data.applyScrollTimeUpdate(domain: $0, additionalMs: $1) },
                     onGrayscaleTick: { data.setGrayscaleSeconds(host: $0, $1) },
                     onRequestClose: { dismiss() }
@@ -52,6 +56,9 @@ private struct InAppWebViewRepresentable: UIViewControllerRepresentable {
     let domain: String
     let scrollLimitMs: Int64
     let grayscaleSeconds: Int
+    let breakOverlayAfterMinutes: Int
+    let harshLocationLat: Double?
+    let harshLocationLon: Double?
     let onScrollTime: (String, Int64) -> Void
     let onGrayscaleTick: (String, Int) -> Void
     let onRequestClose: () -> Void
@@ -62,6 +69,9 @@ private struct InAppWebViewRepresentable: UIViewControllerRepresentable {
             domain: domain,
             scrollLimitMs: scrollLimitMs,
             grayscaleSeconds: grayscaleSeconds,
+            breakOverlayAfterMinutes: breakOverlayAfterMinutes,
+            harshLocationLat: harshLocationLat,
+            harshLocationLon: harshLocationLon,
             onScrollTime: onScrollTime,
             onGrayscaleTick: onGrayscaleTick,
             onRequestClose: onRequestClose
@@ -71,26 +81,76 @@ private struct InAppWebViewRepresentable: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: InAppWebViewController, context: Context) {}
 }
 
-private class InAppWebViewController: UIViewController, WKNavigationDelegate, WKScriptMessageHandler {
+private class InAppWebViewController: UIViewController, WKNavigationDelegate, UIGestureRecognizerDelegate, CLLocationManagerDelegate {
     let url: URL
     let domain: String
     let scrollLimitMs: Int64
     let grayscaleSeconds: Int
+    let breakOverlayAfterMinutes: Int
+    let harshLocationLat: Double?
+    let harshLocationLon: Double?
     let onScrollTime: (String, Int64) -> Void
     let onGrayscaleTick: (String, Int) -> Void
     let onRequestClose: () -> Void
     private var webView: WKWebView?
-    /// Native timer: report time every 5s while browser is open (script-based reporting is unreliable on many sites).
+    /// Native timer: report time every 5s only while this browser view is visible (not backgrounded).
     private var sessionTimeTimer: Timer?
+    /// Drives native grayscale overlay and persisted grayscale seconds; only runs when view is visible.
+    private var sessionSecondsTimer: Timer?
     private let sessionReportInterval: TimeInterval = 5.0
+    private var pageLoadFinished = false
+    /// Session grayscale seconds (persisted via onGrayscaleTick); only increases while view is on screen.
+    private var currentSessionSeconds: Int = 0
+    /// User's time limit in seconds; interventions (friction, darkening, popups) start only after this.
+    private var interventionLimitSeconds: Int { limitSecondsFromScrollLimit(scrollLimitMs) }
+    /// Ramp duration for darkening after limit (seconds). Shorter when at harsh location.
+    private var darkenRampSec: Int { isAtHarshLocation ? 30 : 60 }
+    /// Ramp duration for friction after limit (seconds).
+    private let frictionRampSec = 20
+    /// Min friction multiplier (lower = harsher). Harsher when at harsh location.
+    private var frictionMinMult: CGFloat { isAtHarshLocation ? 0.05 : 0.20 }
+    private let frictionManualGain: CGFloat = 1.35
+    /// Max fade overlay alpha. Stronger when at harsh location.
+    private var fadeOverlayMaxAlpha: CGFloat { isAtHarshLocation ? 0.75 : 0.5 }
+    /// Max blur overlay alpha after limit. Stronger when at harsh location.
+    private var blurOverlayMaxAlpha: CGFloat { isAtHarshLocation ? 0.7 : 0.45 }
+    /// Popup tiers: all relative to limit. First popup at limit, then +1min, +2min, then break at limit + breakOverlayAfterMinutes.
+    private var tier1Sec: Int { interventionLimitSeconds }
+    private var tier2Sec: Int { interventionLimitSeconds + 60 }
+    private var tier3Sec: Int { interventionLimitSeconds + 120 }
+    private var tier4Sec: Int { interventionLimitSeconds + (breakOverlayAfterMinutes * 60) }
+
+    /// Time limit in seconds from scroll limit. If unlimited (0), use 30 min default so interventions still run.
+    private func limitSecondsFromScrollLimit(_ ms: Int64) -> Int {
+        let sec = Int(ms / 1000)
+        return sec > 0 ? sec : (30 * 60)
+    }
+    private var firstScrollAt: Date?
+    private var appliedTier1 = false, appliedTier2 = false, appliedTier3 = false, appliedTier4 = false
+    private var interventionContainer: UIView?
+    private var grayscaleFilter: CIFilter?
+    /// Black fade overlay after limit.
+    private var fadeOverlay: UIView?
+    /// Blur overlay after limit (ramps with darkening).
+    private var blurOverlay: UIVisualEffectView?
+    /// When true, user is at/near the harsh-location address; interventions are stronger.
+    private var isAtHarshLocation = false
+    private let harshLocationRadiusMeters: Double = 150
+    private var locationManager: CLLocationManager?
 
     init(url: URL, domain: String, scrollLimitMs: Int64, grayscaleSeconds: Int,
+         breakOverlayAfterMinutes: Int,
+         harshLocationLat: Double?,
+         harshLocationLon: Double?,
          onScrollTime: @escaping (String, Int64) -> Void, onGrayscaleTick: @escaping (String, Int) -> Void,
          onRequestClose: @escaping () -> Void) {
         self.url = url
         self.domain = domain
         self.scrollLimitMs = scrollLimitMs
         self.grayscaleSeconds = grayscaleSeconds
+        self.breakOverlayAfterMinutes = min(60, max(1, breakOverlayAfterMinutes))
+        self.harshLocationLat = harshLocationLat
+        self.harshLocationLon = harshLocationLon
         self.onScrollTime = onScrollTime
         self.onGrayscaleTick = onGrayscaleTick
         self.onRequestClose = onRequestClose
@@ -103,51 +163,13 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, WK
         super.viewDidLoad()
 
         let contentController = WKUserContentController()
-        contentController.add(self, name: "sisyphus")
-
-        // Config for Sisyphus (persisted grayscale, reporting)
-        let configJSON: [String: Any] = [
-            "tracked": true,
-            "scrollLimitMs": NSNumber(value: scrollLimitMs),
-            "grayscaleSeconds": NSNumber(value: grayscaleSeconds),
-            "host": domain
-        ]
-        let configData = try? JSONSerialization.data(withJSONObject: configJSON)
-        let configStr = configData.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         contentController.addUserScript(WKUserScript(
-            source: "window.__SISYPHUS_CONFIG__ = \(configStr);",
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true
-        ))
-
-        // Friend's viewport script (mobile-friendly)
-        let viewportScript = WKUserScript(
-            source: """
-            (() => {
-              try {
-                let meta = document.querySelector('meta[name="viewport"]');
-                if (!meta) {
-                  meta = document.createElement('meta');
-                  meta.name = 'viewport';
-                  document.head.appendChild(meta);
-                }
-                meta.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
-              } catch (e) {}
-            })();
-            """,
+            source: Self.viewportScript,
             injectionTime: .atDocumentEnd,
             forMainFrameOnly: true
-        )
-        contentController.addUserScript(viewportScript)
-
-        // Inject at document start so we run before redirects/SPA replace the document; also inject at end as fallback.
-        contentController.addUserScript(WKUserScript(
-            source: Self.injectedScript,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true
         ))
         contentController.addUserScript(WKUserScript(
-            source: Self.injectedScript,
+            source: Self.scrollBridgeScript,
             injectionTime: .atDocumentEnd,
             forMainFrameOnly: true
         ))
@@ -170,65 +192,452 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, WK
 
         view.addSubview(wv)
         webView = wv
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleFrictionPan(_:)))
+        pan.delegate = self
+        wv.addGestureRecognizer(pan)
+        wv.scrollView.panGestureRecognizer.require(toFail: pan)
+
+        currentSessionSeconds = grayscaleSeconds
+
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .dark))
+        blur.frame = view.bounds
+        blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        blur.alpha = blurAlpha(for: currentSessionSeconds)
+        blur.isUserInteractionEnabled = false
+        view.addSubview(blur)
+        blurOverlay = blur
+
+        let fade = UIView(frame: view.bounds)
+        fade.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        fade.backgroundColor = .black
+        fade.alpha = fadeAlpha(for: currentSessionSeconds)
+        fade.isUserInteractionEnabled = false
+        view.addSubview(fade)
+        fadeOverlay = fade
+
+        startHarshLocationCheckIfNeeded()
+        applyNativeGrayscale()
+
+        let container = InterventionContainerView(frame: view.bounds)
+        container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(container)
+        interventionContainer = container
+
         var req = URLRequest(url: url)
         req.cachePolicy = .useProtocolCachePolicy
         wv.load(req)
     }
 
-    /// Numbers from JS postMessage often arrive as NSNumber; cast to Int64/Int safely.
-    private static func int64(from value: Any?) -> Int64? {
-        guard let v = value else { return nil }
-        if let n = v as? Int { return Int64(n) }
-        if let n = v as? Int64 { return n }
-        if let n = v as? Double { return Int64(n) }
-        if let n = v as? NSNumber { return n.int64Value }
-        return nil
-    }
-    private static func int(from value: Any?) -> Int? {
-        guard let v = value else { return nil }
-        if let n = v as? Int { return n }
-        if let n = v as? Double { return Int(n) }
-        if let n = v as? NSNumber { return n.intValue }
-        return nil
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if pageLoadFinished { startSessionTimers() }
     }
 
-    /// Get string from message body (JS can send NSString).
-    private static func string(from value: Any?) -> String? {
-        guard let v = value else { return nil }
-        if let s = v as? String { return s }
-        if let s = v as? NSString { return s as String }
-        return nil
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        stopSessionTimers()
     }
 
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "sisyphus" else { return }
-        // Body can be NSDictionary or [String: Any] depending on WebKit; support both.
-        let bodyDict: NSDictionary? = (message.body as? NSDictionary)
-            ?? (message.body as? [String: Any]).map { $0 as NSDictionary }
-        guard let body = bodyDict else { return }
-        let type = Self.string(from: body["type"]) ?? (body["type"] as? String) ?? ""
-        let hostFromMessage = (Self.string(from: body["host"]) ?? body["host"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? domain
-        let normalizedHost = hostFromMessage.replacingOccurrences(of: "www.", with: "", options: .anchored)
-        switch type {
-        case "UPDATE_SCROLL_TIME":
-            guard let ms = Self.int64(from: body["ms"]), ms >= 0 else { return }
-            DispatchQueue.main.async { [onScrollTime] in
-                onScrollTime(normalizedHost.isEmpty ? self.domain : normalizedHost, ms)
-            }
-        case "GRAYSCALE_TICK":
-            if let total = Self.int(from: body["totalSeconds"]) {
-                DispatchQueue.main.async { [onGrayscaleTick] in
-                    onGrayscaleTick(normalizedHost.isEmpty ? self.domain : normalizedHost, total)
-                }
-            }
-        case "REQUEST_CLOSE":
-            DispatchQueue.main.async { [onRequestClose] in
-                onRequestClose()
-            }
+    /// Grayscale/fade: 0 until user's limit, then ramps over darkenRampSec.
+    private func grayscaleIntensity(for seconds: Int) -> CGFloat {
+        if seconds < interventionLimitSeconds { return 0 }
+        return CGFloat(min(1, Double(seconds - interventionLimitSeconds) / Double(darkenRampSec)))
+    }
+
+    private func fadeAlpha(for seconds: Int) -> CGFloat {
+        let intensity = grayscaleIntensity(for: seconds)
+        return fadeOverlayMaxAlpha * intensity
+    }
+
+    /// Blur ramps after limit (same curve as darkening).
+    private func blurAlpha(for seconds: Int) -> CGFloat {
+        let intensity = grayscaleIntensity(for: seconds)
+        return blurOverlayMaxAlpha * intensity
+    }
+
+    private func startHarshLocationCheckIfNeeded() {
+        guard let lat = harshLocationLat, let lon = harshLocationLon else { return }
+        let manager = CLLocationManager()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        manager.requestWhenInUseAuthorization()
+        manager.requestLocation()
+        locationManager = manager
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let loc = locations.last, let lat = harshLocationLat, let lon = harshLocationLon else { return }
+        let harsh = CLLocation(latitude: lat, longitude: lon)
+        let distance = loc.distance(from: harsh)
+        let radius = harshLocationRadiusMeters
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.isAtHarshLocation = distance <= radius
+            self.applyNativeGrayscale()
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {}
+
+    private func applyNativeGrayscale() {
+        let intensity = grayscaleIntensity(for: currentSessionSeconds)
+        fadeOverlay?.alpha = fadeAlpha(for: currentSessionSeconds)
+        blurOverlay?.alpha = blurAlpha(for: currentSessionSeconds)
+        guard let wv = webView else { return }
+        if intensity <= 0 {
+            wv.layer.compositingFilter = nil
+            return
+        }
+        if grayscaleFilter == nil {
+            grayscaleFilter = CIFilter(name: "CIColorMonochrome")
+            grayscaleFilter?.setValue(CIColor(red: 0.5, green: 0.5, blue: 0.5, alpha: 1), forKey: "inputColor")
+        }
+        grayscaleFilter?.setValue(intensity, forKey: "inputIntensity")
+        wv.layer.compositingFilter = grayscaleFilter
+    }
+
+    /// No friction until session exceeds user's limit; then ramps over frictionRampSec.
+    private func frictionMultiplier() -> CGFloat {
+        if currentSessionSeconds < interventionLimitSeconds { return 1 }
+        let secondsOverLimit = currentSessionSeconds - interventionLimitSeconds
+        if secondsOverLimit <= 0 { return 1 }
+        let t = min(1.0, Double(secondsOverLimit) / Double(frictionRampSec))
+        let ramp = t * t
+        return 1 - ramp * (1 - frictionMinMult)
+    }
+
+    @objc private func handleFrictionPan(_ gesture: UIPanGestureRecognizer) {
+        guard let wv = webView else { return }
+        switch gesture.state {
+        case .began:
+            if firstScrollAt == nil { firstScrollAt = Date() }
+        case .changed:
+            let translation = gesture.translation(in: view)
+            gesture.setTranslation(.zero, in: view)
+            let mult = frictionMultiplier()
+            let dy = -translation.y * mult * frictionManualGain
+            let js = "window.__SISYPHUS_SCROLL_BY__ && window.__SISYPHUS_SCROLL_BY__(\(dy));"
+            wv.evaluateJavaScript(js, completionHandler: nil)
+        case .ended, .cancelled:
+            break
         default:
             break
         }
+    }
+
+    private func startSessionTimers() {
+        stopSessionTimers()
+        let domain = self.domain
+        let report: (String, Int64) -> Void = onScrollTime
+        let reportMs = Int64(sessionReportInterval * 1000)
+
+        sessionTimeTimer = Timer.scheduledTimer(withTimeInterval: sessionReportInterval, repeats: true) { [weak self] _ in
+            guard self != nil else { return }
+            DispatchQueue.main.async { report(domain, reportMs) }
+        }
+        RunLoop.main.add(sessionTimeTimer!, forMode: .common)
+        DispatchQueue.main.async { report(domain, reportMs) }
+
+        sessionSecondsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                self.currentSessionSeconds += 1
+                self.onGrayscaleTick(domain, self.currentSessionSeconds)
+                self.applyNativeGrayscale()
+                self.applyInterventionTiers()
+            }
+        }
+        RunLoop.main.add(sessionSecondsTimer!, forMode: .common)
+    }
+
+    private func stopSessionTimers() {
+        sessionTimeTimer?.invalidate()
+        sessionTimeTimer = nil
+        sessionSecondsTimer?.invalidate()
+        sessionSecondsTimer = nil
+    }
+
+    private func applyInterventionTiers() {
+        let sec = currentSessionSeconds
+        let minutes = Double(sec) / 60
+        guard let container = interventionContainer else { return }
+
+        if sec >= tier4Sec && !appliedTier4 {
+            appliedTier4 = true
+            addBreakOverlay(minutes: minutes, to: container)
+        } else if sec >= tier3Sec && !appliedTier3 {
+            appliedTier3 = true
+            addVignette(to: container)
+            addBlurOverlay(to: container)
+        } else if sec >= tier2Sec && !appliedTier2 {
+            appliedTier2 = true
+            addLifeClock(minutes: minutes, to: container)
+            addRegretQuote(to: container)
+        } else if sec >= tier1Sec && !appliedTier1 {
+            appliedTier1 = true
+            addOpportunityCost(to: container)
+        }
+    }
+
+    private func addVignette(to container: UIView) {
+        let v = VignetteView(frame: container.bounds)
+        v.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        v.isUserInteractionEnabled = false
+        v.layer.name = "sisyphus_vignette"
+        v.alpha = 0
+        container.addSubview(v)
+        UIView.animate(withDuration: 0.5, delay: 0, options: .curveEaseOut) { v.alpha = 1 }
+    }
+
+    private func addBlurOverlay(to container: UIView) {
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .dark))
+        blur.frame = container.bounds
+        blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        blur.alpha = 0
+        blur.isUserInteractionEnabled = false
+        blur.layer.name = "sisyphus_blur"
+        container.addSubview(blur)
+        UIView.animate(withDuration: 0.5, delay: 0, options: .curveEaseOut) { blur.alpha = 0.3 }
+    }
+
+    private func addLifeClock(minutes: Double, to container: UIView) {
+        let card = SisyphusPopupCard(gradientColors: Self.purpleGradient)
+        card.layer.name = "sisyphus_lifeclock"
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.alpha = 0
+        card.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
+
+        let icon = UIImageView(image: UIImage(systemName: "clock.badge.exclamationmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .medium)))
+        icon.tintColor = .white
+        icon.translatesAutoresizingMaskIntoConstraints = false
+
+        let valueLabel = UILabel()
+        valueLabel.text = minutes >= 60
+            ? String(format: "%.1f h", minutes / 60)
+            : "\(Int(minutes)) min"
+        valueLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        valueLabel.textColor = .white
+
+        let subtitleLabel = UILabel()
+        let pct = (minutes / 1440) * 100
+        subtitleLabel.text = pct < 0.1 ? "Less than 0.1% of your day" : String(format: "%.1f%% of your day", pct)
+        subtitleLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.9)
+
+        let hintLabel = UILabel()
+        hintLabel.text = "You'll never get this back"
+        hintLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        hintLabel.textColor = UIColor.white.withAlphaComponent(0.8)
+
+        let stack = UIStackView(arrangedSubviews: [icon, valueLabel, subtitleLabel, hintLabel])
+        stack.axis = .vertical
+        stack.spacing = 6
+        stack.alignment = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        card.addSubview(stack)
+        container.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: 16),
+            card.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            card.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 16),
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -16)
+        ])
+        container.layoutIfNeeded()
+        UIView.animate(withDuration: 0.4, delay: 0, options: .curveEaseOut) {
+            card.alpha = 1
+            card.transform = .identity
+        }
+    }
+
+    private static let regretQuotes = [
+        "Is this really what you want to be doing?",
+        "Your future self will wish you stopped",
+        "Every scroll is a choice",
+        "What could you be creating instead?",
+        "This content will be forgotten tomorrow",
+        "Your attention is worth more than this",
+        "Nothing new is coming",
+        "You're trading time for distraction"
+    ]
+
+    private func addRegretQuote(to container: UIView) {
+        let card = SisyphusPopupCard(gradientColors: Self.pinkGradient)
+        card.layer.name = "sisyphus_quote"
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.alpha = 0
+        card.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
+
+        let icon = UIImageView(image: UIImage(systemName: "lightbulb.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 24, weight: .medium)))
+        icon.tintColor = .white
+        icon.translatesAutoresizingMaskIntoConstraints = false
+
+        let quoteLabel = UILabel()
+        quoteLabel.text = Self.regretQuotes.randomElement()
+        quoteLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        quoteLabel.textColor = .white
+        quoteLabel.numberOfLines = 0
+        quoteLabel.textAlignment = .center
+
+        let stack = UIStackView(arrangedSubviews: [icon, quoteLabel])
+        stack.axis = .vertical
+        stack.spacing = 12
+        stack.alignment = .center
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        card.addSubview(stack)
+        container.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            card.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            card.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 24),
+            card.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 24),
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -24),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -24)
+        ])
+        container.layoutIfNeeded()
+        UIView.animate(withDuration: 0.45, delay: 0, options: .curveEaseOut) {
+            card.alpha = 1
+            card.transform = .identity
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak card] in
+            UIView.animate(withDuration: 0.3) { card?.alpha = 0 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { card?.removeFromSuperview() }
+        }
+    }
+
+    private static let opportunityAlts = [
+        "You could have read 10 pages",
+        "You could have learned 20 new words",
+        "You could have done 100 pushups",
+        "You could have meditated",
+        "You could have called a friend",
+        "You could have written a page",
+        "You could have practiced an instrument",
+        "You could have cooked a meal"
+    ]
+
+    private func addOpportunityCost(to container: UIView) {
+        let card = SisyphusPopupCard(gradientColors: Self.blueGradient)
+        card.layer.name = "sisyphus_opportunity"
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.alpha = 0
+        card.transform = CGAffineTransform(translationX: 0, y: 24)
+
+        let icon = UIImageView(image: UIImage(systemName: "sparkles", withConfiguration: UIImage.SymbolConfiguration(pointSize: 22, weight: .medium)))
+        icon.tintColor = .white
+        icon.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleLabel = UILabel()
+        titleLabel.text = "Instead of this…"
+        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.textColor = .white
+
+        let altLabel = UILabel()
+        altLabel.text = Self.opportunityAlts.randomElement()
+        altLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        altLabel.textColor = UIColor.white.withAlphaComponent(0.95)
+        altLabel.numberOfLines = 2
+
+        let stack = UIStackView(arrangedSubviews: [icon, titleLabel, altLabel])
+        stack.axis = .vertical
+        stack.spacing = 8
+        stack.alignment = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        card.addSubview(stack)
+        container.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.bottomAnchor.constraint(equalTo: container.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+            card.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            card.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 16),
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -16)
+        ])
+        container.layoutIfNeeded()
+        UIView.animate(withDuration: 0.4, delay: 0, options: .curveEaseOut) {
+            card.alpha = 1
+            card.transform = .identity
+        }
+    }
+
+    private func addBreakOverlay(minutes: Double, to container: UIView) {
+        let overlay = SisyphusGradientOverlay(colors: Self.purpleGradient)
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        overlay.layer.name = "sisyphus_break"
+        overlay.alpha = 0
+        container.addSubview(overlay)
+        NSLayoutConstraint.activate([
+            overlay.topAnchor.constraint(equalTo: container.topAnchor),
+            overlay.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            overlay.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+
+        let iconView = UIImageView(image: UIImage(systemName: "clock.badge.exclamationmark.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 56, weight: .medium)))
+        iconView.tintColor = .white
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleLabel = UILabel()
+        titleLabel.text = "Time for a break"
+        titleLabel.font = .systemFont(ofSize: 26, weight: .bold)
+        titleLabel.textColor = .white
+        titleLabel.textAlignment = .center
+
+        let minutesLabel = UILabel()
+        minutesLabel.text = "You've been here for \(Int(minutes)) minutes"
+        minutesLabel.font = .systemFont(ofSize: 16, weight: .medium)
+        minutesLabel.textColor = UIColor.white.withAlphaComponent(0.9)
+        minutesLabel.textAlignment = .center
+
+        let subtitleLabel = UILabel()
+        subtitleLabel.text = "Your brain craves novelty, but endless scrolling isn't helping."
+        subtitleLabel.font = .systemFont(ofSize: 15, weight: .regular)
+        subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.8)
+        subtitleLabel.textAlignment = .center
+        subtitleLabel.numberOfLines = 0
+
+        let closeBtn = UIButton(type: .system)
+        closeBtn.setTitle("Close & leave", for: .normal)
+        closeBtn.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        closeBtn.setTitleColor(.white, for: .normal)
+        closeBtn.backgroundColor = UIColor.white.withAlphaComponent(0.25)
+        closeBtn.layer.cornerRadius = 14
+        closeBtn.translatesAutoresizingMaskIntoConstraints = false
+        closeBtn.addTarget(self, action: #selector(breakOverlayCloseTapped), for: .touchUpInside)
+
+        let stack = UIStackView(arrangedSubviews: [iconView, titleLabel, minutesLabel, subtitleLabel, closeBtn])
+        stack.axis = .vertical
+        stack.spacing = 12
+        stack.alignment = .center
+        stack.setCustomSpacing(24, after: subtitleLabel)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: overlay.centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: overlay.leadingAnchor, constant: 32),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: overlay.trailingAnchor, constant: -32),
+            closeBtn.widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
+            closeBtn.heightAnchor.constraint(equalToConstant: 50)
+        ])
+        container.layoutIfNeeded()
+        UIView.animate(withDuration: 0.5, delay: 0, options: .curveEaseOut) {
+            overlay.alpha = 1
+        }
+    }
+
+    @objc private func breakOverlayCloseTapped() {
+        interventionContainer?.subviews.filter { $0.layer.name == "sisyphus_break" }.forEach { $0.removeFromSuperview() }
+        onRequestClose()
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -236,273 +645,125 @@ private class InAppWebViewController: UIViewController, WKNavigationDelegate, WK
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        // Re-inject config and script so we run in the final document (after redirects/SPA load).
-        let configJSON: [String: Any] = [
-            "tracked": true,
-            "scrollLimitMs": NSNumber(value: scrollLimitMs),
-            "grayscaleSeconds": NSNumber(value: grayscaleSeconds),
-            "host": domain
-        ]
-        let configData = try? JSONSerialization.data(withJSONObject: configJSON)
-        let configStr = configData.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-        let runScript = "window.__SISYPHUS_SCRIPT_RAN = false; window.__SISYPHUS_CONFIG__ = \(configStr); \(Self.injectedScript)"
-        webView.evaluateJavaScript(runScript, completionHandler: nil)
-
-        // Native timer: report session time every 5s so the dashboard updates regardless of page script.
-        sessionTimeTimer?.invalidate()
-        let domain = self.domain
-        let report: (String, Int64) -> Void = onScrollTime
-        let reportMs = Int64(sessionReportInterval * 1000)
-        sessionTimeTimer = Timer.scheduledTimer(withTimeInterval: sessionReportInterval, repeats: true) { [weak self] _ in
-            guard self != nil else { return }
-            DispatchQueue.main.async { report(domain, reportMs) }
-        }
-        RunLoop.main.add(sessionTimeTimer!, forMode: .common)
-        // Report once immediately so "Today" updates right away
-        DispatchQueue.main.async { report(domain, reportMs) }
+        webView.evaluateJavaScript(Self.scrollBridgeScript, completionHandler: nil)
+        pageLoadFinished = true
+        startSessionTimers()
     }
 
     deinit {
-        sessionTimeTimer?.invalidate()
-        sessionTimeTimer = nil
+        stopSessionTimers()
     }
 
-    // MARK: - Injected JS: grayscale + touch friction + reporting + SisyphusEffects (graduated interventions)
-    private static var injectedScript: String {
+    // MARK: - Minimal JS (viewport + scroll bridge for native friction)
+    private static var viewportScript: String {
         """
-        (() => {
-          if (window.__SISYPHUS_SCRIPT_RAN) return;
-          window.__SISYPHUS_SCRIPT_RAN = true;
-          const cfg = window.__SISYPHUS_CONFIG__ || {};
-          const tracked = !!cfg.tracked;
-          const host = cfg.host || (document.location && document.location.hostname) || '';
-          let grayscaleSeconds = typeof cfg.grayscaleSeconds === 'number' ? cfg.grayscaleSeconds : 0;
-
-          function getCurrentHost() {
-            try {
-              var h = (document.location && document.location.hostname) ? document.location.hostname : '';
-              return h ? h.replace(/^www\\./, '') : (host || '');
-            } catch (e) { return host || ''; }
-          }
-
-          function send(msg) {
-            try {
-              msg.host = getCurrentHost();
-              if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.sisyphus)
-                window.webkit.messageHandlers.sisyphus.postMessage(msg);
-            } catch (e) {}
-          }
-
-          if (!tracked) return;
-
-          const GRAY_START_AFTER_SEC = 10;
-          const GRAY_RAMP_SEC = 20;
-          const FRICTION_START_AFTER_SCROLL_SEC = 10;
-          const FRICTION_RAMP_SEC = 20;
-          const MIN_MULT = 0.20;
-          const MANUAL_GAIN = 1.35;
-          const REPORT_INTERVAL_MS = 5000;
-          const TIER_1_SEC = 120;
-          const TIER_2_SEC = 300;
-          const TIER_3_SEC = 600;
-          const TIER_4_SEC = 900;
-
-          const clamp01 = (x) => Math.max(0, Math.min(1, x));
-          const now = () => performance.now();
-          let firstScrollAt = null;
-          let scrollReportLastAt = null;
-          let appliedTier1 = false, appliedTier2 = false, appliedTier3 = false, appliedTier4 = false;
-          let extraBlurPx = 0;
-
-          function frictionMult() {
-            if (firstScrollAt === null) return 1;
-            const t = (now() - firstScrollAt) / 1000;
-            if (t < FRICTION_START_AFTER_SCROLL_SEC) return 1;
-            const r = clamp01((t - FRICTION_START_AFTER_SCROLL_SEC) / FRICTION_RAMP_SEC);
-            return 1 - r * r * (1 - MIN_MULT);
-          }
-
-          function grayLevel() {
-            if (grayscaleSeconds < GRAY_START_AFTER_SEC) return 0;
-            return clamp01((grayscaleSeconds - GRAY_START_AFTER_SEC) / GRAY_RAMP_SEC);
-          }
-
-          function applyGrayscaleToPage(pct) {
-            const el = document.documentElement;
-            let f = 'grayscale(' + pct + '%)';
-            if (extraBlurPx > 0) f += ' blur(' + extraBlurPx + 'px)';
-            el.style.filter = f;
-          }
-
-          if (!window.__SISYPHUS_INTERVALS_SET) {
-            window.__SISYPHUS_INTERVALS_SET = true;
-            setInterval(() => {
-              grayscaleSeconds += 1;
-              if (document.documentElement) {
-                const pct = Math.round(grayLevel() * 100);
-                applyGrayscaleToPage(pct);
-              }
-              send({ type: 'GRAYSCALE_TICK', totalSeconds: grayscaleSeconds });
-            }, 1000);
-            setInterval(() => {
-              const t = Date.now();
-              const elapsed = scrollReportLastAt != null ? (t - scrollReportLastAt) : REPORT_INTERVAL_MS;
-              scrollReportLastAt = t;
-              if (elapsed > 0) send({ type: 'UPDATE_SCROLL_TIME', ms: elapsed });
-            }, REPORT_INTERVAL_MS);
-            scrollReportLastAt = Date.now();
-          }
-
-          function isScrollable(el) {
-            if (!el) return false;
-            const s = getComputedStyle(el);
-            return (s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 1;
-          }
-          function findScrollContainerFromPoint(x, y) {
-            let el = document.elementFromPoint(x, y);
-            while (el && el !== document.documentElement) {
-              if (isScrollable(el)) return el;
-              el = el.parentElement;
+        (function(){
+          try {
+            var meta = document.querySelector('meta[name="viewport"]');
+            if (!meta) {
+              meta = document.createElement('meta');
+              meta.name = 'viewport';
+              document.head.appendChild(meta);
             }
-            return document.scrollingElement || document.documentElement;
-          }
-          const THRESH_PX = 8;
-          let tracking = false, tookOver = false, startX = 0, startY = 0, lastY = 0, scroller = null;
-          function resetGesture() { tracking = false; tookOver = false; scroller = null; }
-          document.addEventListener('touchstart', (e) => {
-            if (!e.touches || e.touches.length !== 1) { resetGesture(); return; }
-            tracking = true; tookOver = false;
-            startX = e.touches[0].clientX; startY = e.touches[0].clientY; lastY = startY; scroller = null;
-          }, { passive: true, capture: true });
-          document.addEventListener('touchmove', (e) => {
-            if (!tracking) return;
-            if (!e.touches || e.touches.length !== 1) { resetGesture(); return; }
-            const x = e.touches[0].clientX, y = e.touches[0].clientY;
-            const dyTotal = y - startY, dxTotal = x - startX;
-            if (Math.abs(dyTotal) < THRESH_PX) return;
-            if (Math.abs(dyTotal) < Math.abs(dxTotal)) return;
-            if (firstScrollAt === null) { firstScrollAt = now(); scrollReportLastAt = Date.now(); }
-            const m = frictionMult();
-            if (m >= 0.999) { lastY = y; tookOver = false; scroller = null; return; }
-            if (!tookOver) { tookOver = true; scroller = findScrollContainerFromPoint(x, y); lastY = y; }
-            e.preventDefault();
-            const dy = y - lastY; lastY = y;
-            const delta = -dy * m * MANUAL_GAIN;
-            if (!scroller) scroller = findScrollContainerFromPoint(x, y);
-            if (scroller) scroller.scrollTop += delta;
-          }, { passive: false, capture: true });
-          document.addEventListener('touchend', resetGesture, { passive: true, capture: true });
-          document.addEventListener('touchcancel', resetGesture, { passive: true, capture: true });
-
-          const SisyphusEffects = {
-            applyGrayscale(intensity) {
-              const pct = Math.round(clamp01(intensity != null ? intensity : 1) * 100);
-              applyGrayscaleToPage(pct);
-            },
-            removeGrayscale() { document.documentElement.style.filter = ''; },
-            applyBlur(intensity) {
-              extraBlurPx = intensity != null ? intensity : 3;
-              const pct = Math.round(grayLevel() * 100);
-              applyGrayscaleToPage(pct);
-            },
-            applyVignette() {
-              if (document.getElementById('sisyphus-vignette')) return;
-              const v = document.createElement('div');
-              v.id = 'sisyphus-vignette';
-              v.style.cssText = 'position:fixed;inset:0;pointer-events:none;background:radial-gradient(circle at center,transparent 30%,rgba(0,0,0,0.7) 100%);z-index:999998;transition:opacity 0.5s;';
-              document.body.appendChild(v);
-            },
-            removeVignette() {
-              const v = document.getElementById('sisyphus-vignette');
-              if (v) { v.style.opacity = '0'; setTimeout(() => v.remove(), 500); }
-            },
-            showLifeClock(minutes) {
-              let c = document.getElementById('sisyphus-life-clock');
-              if (!c) {
-                c = document.createElement('div');
-                c.id = 'sisyphus-life-clock';
-                c.style.cssText = 'position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.9);color:#ff4444;padding:12px 16px;border-radius:8px;font-size:14px;z-index:999999;font-family:-apple-system,sans-serif;';
-                document.body.appendChild(c);
-              }
-              const hours = (minutes / 60).toFixed(1);
-              const pct = ((minutes / 1440) * 100).toFixed(1);
-              c.innerHTML = '<strong>⏳ ' + hours + 'h wasted</strong><br><small>' + pct + '% of your day</small><br><small style="color:#888">You\'ll never get this back</small>';
-            },
-            hideLifeClock() {
-              const c = document.getElementById('sisyphus-life-clock');
-              if (c) { c.style.opacity = '0'; setTimeout(() => c.remove(), 300); }
-            },
-            showRegretQuote() {
-              if (document.getElementById('sisyphus-quote')) return;
-              const quotes = ['Is this really what you want to be doing?','Your future self will wish you stopped','Every scroll is a choice','What could you be creating instead?','This content will be forgotten tomorrow','Your attention is worth more than this','How many times will you refresh today?','Nothing new is coming','You\'re trading time for distraction'];
-              const q = document.createElement('div');
-              q.id = 'sisyphus-quote';
-              q.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font-size:22px;color:rgba(255,255,255,0.9);text-align:center;pointer-events:none;z-index:999998;text-shadow:0 0 20px black;padding:40px;max-width:90%;font-family:-apple-system,sans-serif;';
-              q.textContent = quotes[Math.floor(Math.random() * quotes.length)];
-              document.body.appendChild(q);
-              setTimeout(() => q.remove(), 4000);
-            },
-            showOpportunityCost() {
-              let cost = document.getElementById('sisyphus-opportunity-cost');
-              if (!cost) {
-                cost = document.createElement('div');
-                cost.id = 'sisyphus-opportunity-cost';
-                cost.style.cssText = 'position:fixed;bottom:10px;left:10px;background:rgba(0,0,0,0.85);color:#ffaa00;padding:12px 16px;border-radius:8px;font-size:13px;z-index:999999;font-family:-apple-system,sans-serif;max-width:280px;';
-                document.body.appendChild(cost);
-              }
-              const alts = ['You could have read 10 pages','You could have learned 20 new words','You could have done 100 pushups','You could have meditated','You could have called a friend','You could have written a page','You could have practiced an instrument','You could have cooked a meal'];
-              cost.innerHTML = '<strong>Instead of this...</strong><br>' + alts[Math.floor(Math.random() * alts.length)];
-            },
-            hideOpportunityCost() {
-              const c = document.getElementById('sisyphus-opportunity-cost');
-              if (c) c.remove();
-            },
-            showBreakOverlay(minutes) {
-              if (document.getElementById('sisyphus-break-overlay')) return;
-              const overlay = document.createElement('div');
-              overlay.id = 'sisyphus-break-overlay';
-              overlay.style.cssText = 'position:fixed;inset:0;background:rgba(26,26,46,0.98);display:flex;align-items:center;justify-content:center;z-index:9999999;backdrop-filter:blur(10px);';
-              overlay.innerHTML = '<div style="text-align:center;color:#eaeaea;max-width:500px;padding:40px;font-family:-apple-system,sans-serif"><div style="font-size:64px;margin-bottom:20px">🪨</div><h1 style="margin:0 0 16px;font-size:28px">You\'ve been here for ' + Math.floor(minutes) + ' minutes</h1><p style="color:#aaa;margin-bottom:32px">Your brain craves novelty, but endless scrolling isn\'t helping.</p><div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap"><button id="sisyphus-take-break" style="padding:12px 24px;background:#e94560;color:white;border:none;border-radius:8px;cursor:pointer;font-size:16px;font-weight:500">Close & leave</button><button id="sisyphus-override" style="padding:12px 24px;background:transparent;color:#888;border:1px solid #444;border-radius:8px;cursor:pointer;font-size:16px;opacity:0.5" disabled><span id="sisyphus-countdown">10</span>s to continue</button></div></div>';
-              document.body.appendChild(overlay);
-              let cd = 10;
-              const span = overlay.querySelector('#sisyphus-countdown');
-              const btn = overlay.querySelector('#sisyphus-override');
-              const ti = setInterval(() => {
-                cd--;
-                span.textContent = cd;
-                if (cd <= 0) { clearInterval(ti); btn.textContent = 'Continue anyway'; btn.disabled = false; btn.style.opacity = '1'; }
-              }, 1000);
-              overlay.querySelector('#sisyphus-take-break').addEventListener('click', () => { send({ type: 'REQUEST_CLOSE' }); });
-              btn.addEventListener('click', () => { if (cd <= 0) { overlay.remove(); send({ type: 'LOG_OVERRIDE', domain: host }); } });
-            }
-          };
-          window.SisyphusEffects = SisyphusEffects;
-
-          setInterval(() => {
-            if (!document.body) return;
-            const min = grayscaleSeconds / 60;
-            if (grayscaleSeconds >= TIER_4_SEC && !appliedTier4) {
-              appliedTier4 = true;
-              SisyphusEffects.showBreakOverlay(min);
-            } else if (grayscaleSeconds >= TIER_3_SEC && !appliedTier3) {
-              appliedTier3 = true;
-              SisyphusEffects.applyVignette();
-              SisyphusEffects.applyBlur(2);
-            } else if (grayscaleSeconds >= TIER_2_SEC && !appliedTier2) {
-              appliedTier2 = true;
-              SisyphusEffects.showLifeClock(min);
-              SisyphusEffects.showRegretQuote();
-            } else if (grayscaleSeconds >= TIER_1_SEC && !appliedTier1) {
-              appliedTier1 = true;
-              SisyphusEffects.showOpportunityCost();
-            }
-          }, 10000);
-
-          if (grayscaleSeconds > 0) {
-            const pct = Math.round(grayLevel() * 100);
-            applyGrayscaleToPage(pct);
-          }
+            meta.content = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
+          } catch (e) {}
         })();
         """
     }
+
+    private static var scrollBridgeScript: String {
+        """
+        (function(){
+          window.__SISYPHUS_SCROLL_BY__ = function(dy) {
+            try {
+              var el = document.scrollingElement || document.documentElement;
+              if (el) el.scrollTop = (el.scrollTop || 0) + dy;
+            } catch (e) {}
+          };
+        })();
+        """
+    }
+}
+
+/// Container for intervention overlays; passes touches through to the web view unless they hit an interactive subview (e.g. break overlay button).
+/// Gradient colors matching dashboard StatCards
+private extension InAppWebViewController {
+    static var purpleGradient: [UIColor] {
+        [UIColor(red: 102/255, green: 126/255, blue: 234/255, alpha: 1),
+         UIColor(red: 118/255, green: 75/255, blue: 162/255, alpha: 1)]
+    }
+    static var pinkGradient: [UIColor] {
+        [UIColor(red: 240/255, green: 147/255, blue: 251/255, alpha: 1),
+         UIColor(red: 245/255, green: 87/255, blue: 108/255, alpha: 1)]
+    }
+    static var blueGradient: [UIColor] {
+        [UIColor(red: 79/255, green: 172/255, blue: 254/255, alpha: 1),
+         UIColor(red: 0, green: 242/255, blue: 254/255, alpha: 1)]
+    }
+}
+
+private final class SisyphusGradientOverlay: UIView {
+    private let gradientLayer = CAGradientLayer()
+
+    init(colors: [UIColor]) {
+        super.init(frame: .zero)
+        gradientLayer.colors = colors.map { $0.cgColor }
+        gradientLayer.startPoint = CGPoint(x: 0, y: 0)
+        gradientLayer.endPoint = CGPoint(x: 1, y: 1)
+        layer.insertSublayer(gradientLayer, at: 0)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        gradientLayer.frame = bounds
+    }
+}
+
+private final class SisyphusPopupCard: UIView {
+    private let gradientLayer = CAGradientLayer()
+
+    init(gradientColors: [UIColor]) {
+        super.init(frame: .zero)
+        gradientLayer.colors = gradientColors.map { $0.cgColor }
+        gradientLayer.startPoint = CGPoint(x: 0, y: 0)
+        gradientLayer.endPoint = CGPoint(x: 1, y: 1)
+        layer.insertSublayer(gradientLayer, at: 0)
+        layer.cornerRadius = 16
+        clipsToBounds = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        gradientLayer.frame = bounds
+    }
+}
+
+private final class InterventionContainerView: UIView {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        for subview in subviews.reversed() {
+            guard subview.isUserInteractionEnabled, !subview.isHidden, subview.alpha > 0.01 else { continue }
+            let pt = convert(point, to: subview)
+            if subview.bounds.contains(pt), let hit = subview.hitTest(pt, with: event) {
+                return hit
+            }
+        }
+        return nil
+    }
+}
+
+private final class VignetteView: UIView {
+    override class var layerClass: AnyClass { CAGradientLayer.self }
+    private var gradientLayer: CAGradientLayer { layer as! CAGradientLayer }
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        gradientLayer.colors = [UIColor.clear.cgColor, UIColor.black.withAlphaComponent(0.7).cgColor]
+        gradientLayer.locations = [0.3, 1.0]
+        gradientLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
+        gradientLayer.endPoint = CGPoint(x: 0.5, y: 1.0)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }
