@@ -1,6 +1,6 @@
 /**
  * Sisyphus - Anti-Doomscrolling Extension
- * Background service worker - handles storage, 24-hour reset logic, and domain matching
+ * Background service worker - handles storage, 24-hour reset logic, and intervention levels
  */
 
 const STORAGE_KEYS = {
@@ -10,6 +10,14 @@ const STORAGE_KEYS = {
 };
 
 const HOURS_24_MS = 24 * 60 * 60 * 1000;
+
+const InterventionLevel = {
+  OBSERVE: 0,      // Just tracking, no effects
+  GENTLE: 1,       // Grayscale + life clock  
+  MODERATE: 2,     // + Blur + vignette + quotes
+  AGGRESSIVE: 3,   // + Click delay + dopamine counter + opportunity cost
+  NUCLEAR: 4       // + Break overlay (last resort)
+};
 
 /**
  * Get the current domain's storage key (normalized)
@@ -86,6 +94,55 @@ async function updateScrollTime(domain, additionalMs) {
 }
 
 /**
+ * Calculate intervention level based on usage patterns and time since install
+ * Implements "boiling frog" gradual escalation
+ */
+async function getInterventionLevel(domain) {
+  const result = await chrome.storage.sync.get([
+    STORAGE_KEYS.SCROLL_DATA,
+    STORAGE_KEYS.SETTINGS,
+    'installDate'
+  ]);
+  
+  const scrollData = result[STORAGE_KEYS.SCROLL_DATA] || {};
+  const settings = result[STORAGE_KEYS.SETTINGS] || {};
+  const installDate = result.installDate || Date.now();
+  
+  const daysSinceInstall = (Date.now() - installDate) / (24 * 60 * 60 * 1000);
+  const scrollTime = scrollData[domain]?.totalMs || 0;
+  const minutes = scrollTime / 60000;
+  
+  // Check if user has disabled interventions for this domain
+  if (settings.disabledDomains && settings.disabledDomains.includes(domain)) {
+    return InterventionLevel.OBSERVE;
+  }
+  
+  // Week 1: Just observe - let them see the tracking works
+  if (daysSinceInstall < 7) {
+    return InterventionLevel.OBSERVE;
+  }
+  
+  // Week 2: Gentle nudges after 20 minutes
+  if (daysSinceInstall < 14) {
+    return minutes > 20 ? InterventionLevel.GENTLE : InterventionLevel.OBSERVE;
+  }
+  
+  // Week 3: Start escalating
+  if (daysSinceInstall < 21) {
+    if (minutes < 15) return InterventionLevel.OBSERVE;
+    if (minutes < 30) return InterventionLevel.GENTLE;
+    return InterventionLevel.MODERATE;
+  }
+  
+  // Week 4+: Full graduated intervention
+  if (minutes < 10) return InterventionLevel.OBSERVE;
+  if (minutes < 20) return InterventionLevel.GENTLE;
+  if (minutes < 35) return InterventionLevel.MODERATE;
+  if (minutes < 50) return InterventionLevel.AGGRESSIVE;
+  return InterventionLevel.NUCLEAR; // Go nuclear after 50min
+}
+
+/**
  * Message handler from content script
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -112,6 +169,63 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     return true;
   }
+
+  // NEW: Get intervention level for current domain
+  if (message.type === 'GET_INTERVENTION_LEVEL') {
+    const domain = getDomainKey(sender.url || message.url);
+    if (domain) {
+      getInterventionLevel(domain).then(level => {
+        getScrollDataWithReset().then(scrollData => {
+          const minutes = (scrollData[domain]?.totalMs || 0) / 60000;
+          sendResponse({ level, minutes });
+        });
+      });
+      return true;
+    }
+  }
+
+  // NEW: Log override events (when user bypasses nuclear intervention)
+  if (message.type === 'LOG_OVERRIDE') {
+    const domain = message.domain;
+    console.log(`[Sisyphus] User overrode intervention on ${domain}`);
+    
+    // Could track overrides to increase friction in future
+    chrome.storage.local.get(['overrides'], (result) => {
+      const overrides = result.overrides || {};
+      overrides[domain] = (overrides[domain] || 0) + 1;
+      chrome.storage.local.set({ overrides });
+    });
+    
+    sendResponse({ success: true });
+    return true;
+  }
+});
+
+/**
+ * Initialize install date on first install
+ * This is critical for the boiling frog escalation
+ */
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === 'install') {
+    chrome.storage.sync.set({ 
+      installDate: Date.now() 
+    });
+    console.log('[Sisyphus] Extension installed - tracking start date');
+  }
+  
+  // Also ensure install date exists on update
+  chrome.storage.sync.get(['installDate'], (result) => {
+    if (!result.installDate) {
+      chrome.storage.sync.set({ installDate: Date.now() });
+    }
+  });
+});
+
+/**
+ * Log when browser starts up (for debugging)
+ */
+chrome.runtime.onStartup.addListener(() => {
+  console.log('[Sisyphus] Browser started, service worker active');
 });
 
 // Export for popup (via chrome.runtime.getBackgroundPage or messaging)
