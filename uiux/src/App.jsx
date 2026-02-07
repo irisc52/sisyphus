@@ -4,31 +4,61 @@ import viteLogo from '/vite.svg'
 import './App.css'
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [timeLimit, setTimeLimit] = useState(15) // minutes
+  const [domains, setDomains] = useState(['instagram.com', 'twitter.com'])
+  const [newDomain, setNewDomain] = useState('')
+
+  const addDomain = () => {
+    if (newDomain && !domains.includes(newDomain)) {
+      setDomains([...domains, newDomain])
+      setNewDomain('')
+    }
+  }
+
+  const removeDomain = (domain) => {
+    setDomains(domains.filter(d => d !== domain))
+  }
 
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+    <div className="app">
+      <h1>⛰️ Sisyphus</h1>
+      <p>Anti-doomscrolling tool</p>
+
+      <div className="section">
+        <h2>Time Limit</h2>
+        <input 
+          type="number" 
+          value={timeLimit}
+          onChange={(e) => setTimeLimit(e.target.value)}
+          min="1"
+        />
+        <span> minutes before scroll slows down</span>
       </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.jsx</code> and save to test HMR
-        </p>
+
+      <div className="section">
+        <h2>Blocked Domains</h2>
+        <ul>
+          {domains.map(domain => (
+            <li key={domain}>
+              {domain}
+              <button onClick={() => removeDomain(domain)}>✕</button>
+            </li>
+          ))}
+        </ul>
+
+        <div>
+          <input 
+            type="text"
+            placeholder="e.g. reddit.com"
+            value={newDomain}
+            onChange={(e) => setNewDomain(e.target.value)}
+          />
+          <button onClick={addDomain}>Add Domain</button>
+        </div>
       </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
+
+      <button className="save-btn">Save Settings</button>
+    </div>
   )
 }
 

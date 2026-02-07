@@ -18,15 +18,13 @@ Anti-doomscrolling web extension. Tracks scroll time on selected domains with a 
 
 ## iOS Safari Setup
 
-Safari Web Extensions on iOS require wrapping in an Xcode project:
+Safari Web Extensions on iOS require wrapping in an Xcode project. See **[IOS-XCODE-GUIDE.md](IOS-XCODE-GUIDE.md)** for step-by-step instructions.
 
-1. Install [Xcode](https://developer.apple.com/xcode/) on macOS
-2. Create a new app project or use Safari Extension template
-3. Add this extension: **File → Add Files to Project** → select the `sisyphus` folder
-4. In Xcode: **Product → Scheme → Edit Scheme** → set run destination to your iPhone
-5. Build and run on device
-
-Alternatively, use [WebExtension Converter](https://developer.apple.com/documentation/safariservices/safari_web_extensions/converting_a_web_extension_for_safari) for Safari.
+Quick path:
+1. **Xcode → File → New → Project** → **Safari Extension App**
+2. Replace the template extension files with files from `extension/`
+3. **Run** (▶️) with your iPhone as the destination
+4. On iPhone: **Settings → VPN & Device Management** → Trust → **Safari → Extensions** → Enable Sisyphus
 
 ## Project Structure
 
