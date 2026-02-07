@@ -55,10 +55,45 @@ section h2 {
   margin-bottom: 6px;
 }
 
-.input-row {
+.input-row,
+.limit-row {
   display: flex;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.limit-row select {
+  flex: 1;
+  padding: 10px 12px;
+  border: 1px solid #3d3d5c;
+  border-radius: 8px;
+  background: #16213e;
+  color: #eaeaea;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.limit-row select:focus {
+  outline: none;
+  border-color: #e94560;
+}
+
+.limit-row input[type="number"] {
+  width: 70px;
+  padding: 10px 12px;
+  border: 1px solid #3d3d5c;
+  border-radius: 8px;
+  background: #16213e;
+  color: #eaeaea;
+  font-size: 14px;
+}
+
+.limit-row input[type="number"].hidden {
+  display: none;
+}
+
+.hidden {
+  display: none !important;
 }
 
 input[type="text"] {
@@ -201,4 +236,28 @@ button.secondary:hover {
   content: "No scroll data yet.";
   font-size: 13px;
   color: #666;
+}
+.dashboard-link {
+  margin-bottom: 16px;
+}
+
+.dashboard-button {
+  width: 100%;
+  padding: 12px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.dashboard-button:hover {
+  transform: translateY(-2px);
+}
+
+.dashboard-button:active {
+  transform: translateY(0);
 }
