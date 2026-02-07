@@ -86,13 +86,14 @@ struct DomainListView: View {
                 }
                 .background(Color(.systemGroupedBackground))
                 .navigationTitle("Domains")
-                .alert("Invalid domain", isPresented: $showAddError) {
-                    Button("OK", role: .cancel) {}
-                } message: {
-                    Text("Please enter a valid domain (e.g. reddit.com)")
-                }
+            .alert("Invalid domain", isPresented: $showAddError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Please enter a valid domain (e.g. reddit.com)")
             }
-        } else {
+            .onAppear { data.refresh() }
+        }
+    } else {
             // Fallback on earlier versions
         }
     }

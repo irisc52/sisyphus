@@ -68,9 +68,11 @@
 				Assets.xcassets,
 				DashboardView.swift,
 				DomainListView.swift,
+				InAppBrowserView.swift,
 				Resources/Icon.png,
 				Resources/Script.js,
 				Resources/Style.css,
+				"Resources/sisyphus-inapp.js",
 				SettingsView.swift,
 				SisyphusContentView.swift,
 				SisyphusData.swift,
@@ -99,9 +101,11 @@
 				Assets.xcassets,
 				DashboardView.swift,
 				DomainListView.swift,
+				InAppBrowserView.swift,
 				Resources/Icon.png,
 				Resources/Script.js,
 				Resources/Style.css,
+				"Resources/sisyphus-inapp.js",
 				SettingsView.swift,
 				SisyphusContentView.swift,
 				SisyphusData.swift,
@@ -482,6 +486,7 @@
 		32563DF52F37217000417283 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "iOS (Extension)/SisyphusExtension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 7B9SYXDG8P;
@@ -516,6 +521,7 @@
 		32563DF62F37217000417283 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "iOS (Extension)/SisyphusExtension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 7B9SYXDG8P;
@@ -553,6 +559,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "iOS (App)/SisyphusApp.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 7B9SYXDG8P;
@@ -594,6 +601,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "iOS (App)/SisyphusApp.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 7B9SYXDG8P;

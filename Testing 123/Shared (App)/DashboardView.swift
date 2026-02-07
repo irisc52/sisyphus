@@ -9,7 +9,10 @@ import SwiftUI
 
 struct DashboardView: View {
     @ObservedObject var data = SisyphusData.shared
-    
+    @State private var refreshTimer: Timer?
+    @State private var domainToOpen: String?
+    @State private var showInAppBrowser = false
+
     var body: some View {
         if #available(iOS 16.0, *) {
             NavigationStack {
@@ -46,6 +49,41 @@ struct DashboardView: View {
                             )
                         }
                         .padding(.horizontal)
+
+                        // Browse in Sisyphus — open tracked sites inside the app with constraints
+                        if !data.trackedDomains.isEmpty {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Label("Browse in Sisyphus", systemImage: "safari")
+                                    .font(.headline)
+                                    .foregroundStyle(.secondary)
+                                Text("Open these sites inside the app to apply grayscale and scroll friction.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                ForEach(data.trackedDomains, id: \.self) { domain in
+                                    Button {
+                                        domainToOpen = domain
+                                        showInAppBrowser = true
+                                    } label: {
+                                        HStack {
+                                            Image(systemName: "globe")
+                                                .foregroundStyle(.purple)
+                                            Text(domain)
+                                                .font(.subheadline.weight(.medium))
+                                                .foregroundStyle(.primary)
+                                            Spacer()
+                                            Image(systemName: "arrow.up.forward")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .padding()
+                                        .background(Color(.systemGray6))
+                                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal)
+                        }
                         
                         // Per-domain stats
                         if !data.domainsWithStats.isEmpty {
@@ -132,6 +170,27 @@ struct DashboardView: View {
                 .background(Color(.systemGroupedBackground))
                 .navigationTitle("Sisyphus")
                 .navigationBarTitleDisplayMode(.large)
+            }
+            .onAppear {
+                data.refresh()
+                refreshTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { _ in
+                    data.refresh()
+                }
+                RunLoop.main.add(refreshTimer!, forMode: .common)
+            }
+            .onDisappear {
+                refreshTimer?.invalidate()
+                refreshTimer = nil
+            }
+            .fullScreenCover(isPresented: $showInAppBrowser, onDismiss: {
+                data.refresh()
+            }) {
+                Group {
+                    if let domain = domainToOpen, let url = URL(string: "https://\(domain)") {
+                        InAppBrowserView(url: url, domain: domain)
+                            .onDisappear { domainToOpen = nil }
+                    }
+                }
             }
         } else {
             // Fallback on earlier versions

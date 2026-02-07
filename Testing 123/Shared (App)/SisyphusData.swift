@@ -26,7 +26,14 @@ class SisyphusData: ObservableObject {
     private let scrollDataKey = "scrollData"
     private let scrollLimitMsKey = "scrollLimitMs"
     
-    private let defaults = UserDefaults.standard
+    /// App Group ID - add in Xcode: Signing & Capabilities → App Groups → group.ICKI.sisyphus
+    private static let appGroupID = "group.ICKI.sisyphus"
+
+    /// Use App Group for sync with Safari extension; fallback to standard if not configured
+    private var defaults: UserDefaults {
+        UserDefaults(suiteName: Self.appGroupID) ?? UserDefaults.standard
+    }
+    
     private let hours24Ms: Int64 = 24 * 60 * 60 * 1000
     
     @Published var trackedDomains: [String] {
@@ -55,17 +62,18 @@ class SisyphusData: ObservableObject {
     }
     
     init() {
-        self.trackedDomains = defaults.stringArray(forKey: trackedDomainsKey) ?? []
-        
-        if let data = defaults.data(forKey: scrollDataKey),
+        let store = UserDefaults(suiteName: Self.appGroupID) ?? UserDefaults.standard
+        self.trackedDomains = store.stringArray(forKey: trackedDomainsKey) ?? []
+
+        if let data = store.data(forKey: scrollDataKey),
            let decoded = try? JSONDecoder().decode([String: ScrollEntry].self, from: data) {
             self.scrollData = decoded
         } else {
             self.scrollData = [:]
         }
-        
-        let limitMs = defaults.object(forKey: scrollLimitMsKey) as? Int64 ?? (30 * 60 * 1000)
-        self.scrollLimitMinutes = limitMs > 0 ? Int(limitMs / 60000) : 30
+
+        let limitMs = store.object(forKey: scrollLimitMsKey) as? Int64 ?? (30 * 60 * 1000)
+        self.scrollLimitMinutes = limitMs > 0 ? Int(limitMs / 60000) : 0
     }
     
     func shouldReset(_ timestamp: Int64) -> Bool {
@@ -138,5 +146,61 @@ class SisyphusData: ObservableObject {
         let hours = mins / 60
         let remainMins = mins % 60
         return "\(hours)h \(remainMins)m"
+    }
+
+    // MARK: - In-app browser grayscale (seconds per host)
+    private func grayscaleKey(host: String) -> String { "grayscale_\(host)" }
+
+    func getGrayscaleSeconds(host: String) -> Int {
+        let key = grayscaleKey(host: host)
+        return defaults.object(forKey: key) as? Int ?? 0
+    }
+
+    func setGrayscaleSeconds(host: String, _ seconds: Int) {
+        defaults.set(seconds, forKey: grayscaleKey(host: host))
+    }
+
+    /// Apply scroll time reported from in-app browser (same 24h reset logic as extension)
+    func applyScrollTimeUpdate(domain: String, additionalMs: Int64) {
+        let normalized = normalizeDomain(domain) ?? domain
+        guard !normalized.isEmpty else { return }
+        let doUpdate = { [weak self] in
+            guard let self = self else { return }
+            if !self.trackedDomains.contains(normalized) {
+                self.trackedDomains.append(normalized)
+            }
+            var data = self.scrollData
+            let entry = data[normalized]
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            let newEntry: ScrollEntry
+            if entry == nil || self.shouldReset(entry!.lastResetTimestamp) {
+                newEntry = ScrollEntry(totalMs: additionalMs, lastResetTimestamp: now)
+            } else {
+                newEntry = ScrollEntry(totalMs: entry!.totalMs + additionalMs, lastResetTimestamp: entry!.lastResetTimestamp)
+            }
+            data[normalized] = newEntry
+            self.objectWillChange.send()
+            self.scrollData = data
+        }
+        if Thread.isMainThread {
+            doUpdate()
+        } else {
+            DispatchQueue.main.async(execute: doUpdate)
+        }
+    }
+
+    /// Reload from storage (e.g. when extension has synced new scroll data)
+    func refresh() {
+        objectWillChange.send()
+
+        trackedDomains = defaults.stringArray(forKey: trackedDomainsKey) ?? []
+
+        if let data = defaults.data(forKey: scrollDataKey),
+           let decoded = try? JSONDecoder().decode([String: ScrollEntry].self, from: data) {
+            scrollData = decoded
+        }
+
+        let limitMs = defaults.object(forKey: scrollLimitMsKey) as? Int64 ?? (30 * 60 * 1000)
+        scrollLimitMinutes = limitMs > 0 ? Int(limitMs / 60000) : 0
     }
 }

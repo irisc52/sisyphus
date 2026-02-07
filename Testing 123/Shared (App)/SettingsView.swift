@@ -73,6 +73,7 @@ struct SettingsView: View {
                     }
                 }
                 .navigationTitle("Settings")
+                .onAppear { data.refresh() }
             }
         } else {
             // Fallback on earlier versions

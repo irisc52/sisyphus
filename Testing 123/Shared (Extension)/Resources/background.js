@@ -1,15 +1,19 @@
 /**
  * Sisyphus - Anti-Doomscrolling Extension
  * Background service worker - handles storage, 24-hour reset logic, and domain matching
+ * Syncs with native app via sendNativeMessage for live dashboard updates
  */
 
 const STORAGE_KEYS = {
   TRACKED_DOMAINS: 'trackedDomains',
   SCROLL_DATA: 'scrollData',
+  SCROLL_LIMIT_MS: 'scrollLimitMs',
   SETTINGS: 'settings'
 };
 
 const HOURS_24_MS = 24 * 60 * 60 * 1000;
+const NATIVE_APP = 'ICKI.Testing-123';
+const SYNC_INTERVAL_MS = 5000;
 
 /**
  * Get the current domain's storage key (normalized)
@@ -114,5 +118,64 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// Export for popup (via chrome.runtime.getBackgroundPage or messaging)
-// Popup will use chrome.storage directly and messaging for background logic
+// Sync extension data to native app so SwiftUI dashboard stays live
+async function syncToNativeApp() {
+  try {
+    const r = await chrome.storage.sync.get([
+      STORAGE_KEYS.TRACKED_DOMAINS,
+      STORAGE_KEYS.SCROLL_DATA,
+      STORAGE_KEYS.SCROLL_LIMIT_MS
+    ]);
+    const trackedDomains = r[STORAGE_KEYS.TRACKED_DOMAINS] || [];
+    const scrollData = r[STORAGE_KEYS.SCROLL_DATA] || {};
+    const scrollLimitMs = r[STORAGE_KEYS.SCROLL_LIMIT_MS] ?? 30 * 60 * 1000;
+
+    const browser = typeof chrome !== 'undefined' ? chrome : typeof browser !== 'undefined' ? browser : null;
+    if (browser?.runtime?.sendNativeMessage) {
+      await browser.runtime.sendNativeMessage(NATIVE_APP, {
+        type: 'syncFromExtension',
+        trackedDomains,
+        scrollData,
+        scrollLimitMs
+      });
+    }
+  } catch (e) {
+    // Native app may not be available (e.g. Chrome)
+  }
+}
+
+// Get config from native app (domains, limit) and merge into extension storage
+async function pullConfigFromNativeApp() {
+  try {
+    const browser = typeof chrome !== 'undefined' ? chrome : typeof browser !== 'undefined' ? browser : null;
+    if (!browser?.runtime?.sendNativeMessage) return;
+
+    const response = await browser.runtime.sendNativeMessage(NATIVE_APP, { type: 'getConfig' });
+    if (response?.ok && response.trackedDomains) {
+      await chrome.storage.sync.set({
+        [STORAGE_KEYS.TRACKED_DOMAINS]: response.trackedDomains
+      });
+    }
+    if (response?.ok && response.scrollLimitMs != null) {
+      await chrome.storage.sync.set({
+        [STORAGE_KEYS.SCROLL_LIMIT_MS]: response.scrollLimitMs
+      });
+    }
+  } catch (e) {
+    // Native app may not be available
+  }
+}
+
+// Start sync loop and pull config on startup
+chrome.runtime.onStartup?.addListener(() => {
+  pullConfigFromNativeApp();
+  setInterval(syncToNativeApp, SYNC_INTERVAL_MS);
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'sync') syncToNativeApp();
+});
+
+// Initial sync and config pull
+pullConfigFromNativeApp();
+setInterval(syncToNativeApp, SYNC_INTERVAL_MS);

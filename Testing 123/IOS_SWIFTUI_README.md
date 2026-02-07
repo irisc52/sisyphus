@@ -20,12 +20,23 @@ The main app now uses SwiftUI instead of the previous web-based UI. The Safari e
 
 ## Data Sync with Extension
 
-The SwiftUI app stores data in **UserDefaults** locally. The Safari extension uses **browser.storage** in its own context. Right now these are separate. To sync data between the app and extension:
+The app and extension now sync via **App Groups** (`group.ICKI.sisyphus`):
 
-1. Add **App Groups** capability to both the app and extension targets
-2. Use `UserDefaults(suiteName: "group.com.yourteam.sisyphus")` for shared storage
-3. Update `SafariWebExtensionHandler.swift` to respond to `sendNativeMessage` requests from the extension with the shared config
-4. Update the extension's `background.js` to request config from the native side on startup
+- **App** writes domains and time limit to shared UserDefaults; reads scroll data from shared
+- **Extension** syncs scroll data to native every 5 seconds; pulls config (domains, limit) from native on startup
+- **Dashboard** refreshes every 3 seconds so stats stay up to date
+
+### Enabling App Groups in Xcode
+
+1. Open the project in Xcode
+2. Select the **Testing 123 (iOS)** target → **Signing & Capabilities** → **+ Capability** → **App Groups**
+3. Add `group.ICKI.sisyphus` (or create it and check the box)
+4. Repeat for **Testing 123 Extension (iOS)** target
+
+Entitlements files are already created (`SisyphusApp.entitlements`, `SisyphusExtension.entitlements`). If you use a different team/bundle ID, update the group ID in:
+- `SisyphusData.swift`
+- `SafariWebExtensionHandler.swift`
+- Both `.entitlements` files
 
 ## Files Added
 
