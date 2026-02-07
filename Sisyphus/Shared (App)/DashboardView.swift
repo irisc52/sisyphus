@@ -30,7 +30,6 @@ struct DashboardView: View {
             NavigationStack {
                 ScrollView {
                     VStack(spacing: 24) {
-                        // Rotating stat cards — swipe + auto-rotate + arrows
                         VStack(spacing: 12) {
                             HStack(spacing: 0) {
                                 Button {
@@ -112,7 +111,6 @@ struct DashboardView: View {
                         }
                         .padding(.horizontal)
 
-                        // Break reminder — when to show full-screen break in in-app browser
                         VStack(alignment: .leading, spacing: 12) {
                             Label("Break reminder", systemImage: "clock.badge.exclamationmark")
                                 .font(.headline)
@@ -139,7 +137,6 @@ struct DashboardView: View {
                         }
                         .padding(.horizontal)
 
-                        // Browse in Sisyphus — open tracked sites inside the app with constraints
                         if !data.trackedDomains.isEmpty {
                             VStack(alignment: .leading, spacing: 12) {
                                 Label("Browse in Sisyphus", systemImage: "safari")
@@ -174,7 +171,6 @@ struct DashboardView: View {
                             .padding(.horizontal)
                         }
                         
-                        // Per-domain stats
                         if !data.domainsWithStats.isEmpty {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("Today's scroll by site")
@@ -201,7 +197,6 @@ struct DashboardView: View {
                             .padding(.horizontal)
                         }
                         
-                        // Today's usage by hour — Screen Time style: all 24 bars on one screen, x-axis at bottom
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Today")
                                 .font(.headline)
