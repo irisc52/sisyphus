@@ -1,4 +1,4 @@
-Anti-Doomscrolling Chrome Extension
+Anti-Doomscrolling iOS app
 
 Demo Video: https://www.youtube.com/watch?v=NJQ1NKt1kKM  
 
@@ -15,11 +15,11 @@ Features:
 
 Installation:
 
-Install Xcode on macOS
-Create a new app project or use Safari Extension template
-Add this extension: File → Add Files to Project → select the sisyphus folder
-In Xcode: Product → Scheme → Edit Scheme → set run destination to your iPhone
-Connect your iPhone to your device and on your phone, turn on Developer Mode in Settings
-Build and run on device
+1. Install Xcode on macOS
+2. Create a new app project or use Safari Extension template
+3. Add this extension: File → Add Files to Project → select the sisyphus folder
+4. In Xcode: Product → Scheme → Edit Scheme → set run destination to your iPhone
+5. Connect your iPhone to your device and on your phone, turn on Developer Mode in Settings
+6. Build and run on device
 
 
