@@ -8,10 +8,10 @@ An iOS app that makes doomscrolling physically exhausting: the longer you scroll
 
 Features:
 
-Progressive scroll resistance - Gets harder the more you scroll
-Custom time limits and domains
-Analytics dashboard - Track time wasted, how many domains being blocked
-24-hour reset - Fresh start every day
+- Progressive scroll resistance - Gets harder the more you scroll
+- Custom time limits and domains
+- Analytics dashboard - Track time wasted, how many domains being blocked
+- 24-hour reset: fresh start every day
 
 Installation:
 
